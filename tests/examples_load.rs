@@ -1,8 +1,12 @@
-//! The shipped example configs under `examples/` must parse. They are
-//! the operator's starting point; a config that can't load is a broken
-//! example. `roles_dir` in each is relative, so the config resolves it
-//! against the process cwd — pinned here to the crate dir (where the
+//! The shipped example config under `examples/` must parse. It is the
+//! operator's starting point; a config that can't load is a broken
+//! example. `roles_dir` is relative, so the config resolves it against
+//! the process cwd — pinned here to the crate dir (where the
 //! `examples/` policy templates live) so the test is invocation-agnostic.
+//!
+//! The Elide-specific inventory (`mint-elide.toml` + `elide_roles/`)
+//! lives in the elide repo, which owns its mint customization; its
+//! parse coverage is the elide attested-loop e2e.
 
 use mint::config::Config;
 
@@ -53,25 +57,4 @@ fn mint_demo_config_loads() {
         cfg.roles["demo-attested"].attestation_mode.is_some(),
         "demo-attested carries the attested TPC"
     );
-}
-
-#[test]
-fn mint_elide_config_loads() {
-    pin_cwd();
-    let cfg = Config::load(&example("mint-elide.toml")).expect("mint-elide.toml");
-    cfg.validate_policy_surface()
-        .expect("elide templates satisfy the seal-authoring surface checks");
-    // The Elide inventory needs `auth_location`: enrollment is
-    // operator-gated (the invite + ticket carry the enroll/exchange
-    // gates, keyed by K_M-A).
-    assert!(
-        cfg.auth_location.is_some(),
-        "enrollment gates require auth_location"
-    );
-    // The four-role inventory: coord-ro/coord-rw/volume-ro/volume-rw,
-    // none carrying a third-party caveat (operator authority moved to
-    // enrollment).
-    let mut names: Vec<&str> = cfg.roles.keys().map(String::as_str).collect();
-    names.sort_unstable();
-    assert_eq!(names, ["coord-ro", "coord-rw", "volume-ro", "volume-rw"]);
 }
