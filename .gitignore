@@ -8,6 +8,10 @@ target
 /mint-demo.toml
 /mint.toml
 
+# Local copy of the op-run env file (deployment-specific 1Password refs).
+/mint-demo.env
+/mint.env
+
 # Local runtime state: the daemon's data_dir (default ./mint_data) and
 # the reference client's identity/credential dir (default ./mint_client).
 /mint_data/

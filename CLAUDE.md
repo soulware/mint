@@ -51,6 +51,18 @@ against real Tigris IAM (or any S3-compatible backend speaking the IAM API) and 
 admin credential in the environment — never in the TOML. There is **no in-process dev backend** on
 the operator/serve surface.
 
+To supply the `AWS_*` admin credential from 1Password rather than exporting raw secrets, use
+`op run` with the example env file (which holds `op://…` *references*, not secrets, so it's
+committed). Only `serve` touches IAM, so only it needs the wrapper:
+
+```sh
+cp examples/mint-demo.env ./mint-demo.env     # then edit refs for your vault
+op run --env-file ./mint-demo.env -- mint serve
+```
+
+`./mint-demo.env` is gitignored. `op run` resolves the refs and injects the values into mint's
+process env only — nothing secret lands in the shell, history, or on disk.
+
 Operator side (server host):
 ```sh
 mint serve                          # vending HTTP surface; AWS_* in env

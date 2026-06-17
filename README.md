@@ -90,6 +90,15 @@ mint enroll list    --config mint-demo.toml
 mint enroll approve --config mint-demo.toml <sub>    # shows the fingerprint, interactive y/N; --yes for automation
 ```
 
+`mint serve` reads its `AWS_*` admin credential from the environment (never the TOML). To source it
+from 1Password, wrap `serve` in `op run` with the committed example env file — which holds `op://…`
+*references*, not secrets:
+
+```sh
+cp examples/mint-demo.env ./mint-demo.env            # gitignored; edit refs for your vault
+op run --env-file ./mint-demo.env -- mint serve --config mint-demo.toml
+```
+
 Client (the coordinator's half; identity under `./mint_client`):
 
 ```sh
