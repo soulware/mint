@@ -1,0 +1,50 @@
+name: ci
+
+# mint's entire CI: fmt, clippy, and the test suite. mint is a single
+# standalone Cargo workspace, so everything runs from the repo root.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mint-build
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      # --features e2e-harness so the hermetic mint-e2e harness bin (which
+      # cross-repo e2e tests in elide spawn) is linted too.
+      - name: cargo clippy
+        run: cargo clippy --all-targets --features e2e-harness -- -D warnings
+
+      - name: cargo test
+        run: cargo test --no-fail-fast
+
+      - name: Upload proptest regressions
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proptest-regressions
+          path: "**/proptest-regressions/**"
+          if-no-files-found: ignore
