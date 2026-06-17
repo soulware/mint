@@ -159,3 +159,17 @@ band and **fails closed if absent**. See `open_store` in `main.rs` for the gatin
 TLS, multi-root / root rotation as an operation, multi-tenancy, `ListRoles`/`GetRole`, and
 third-party-caveat discharge for a central identity authority. Backup/replication of `data_dir`
 and root rotation remain open questions.
+
+## Reference material
+
+Fly.io's macaroon work is the closest public reference implementation and writing — useful
+background for the caveat algebra, third-party-caveat discharge, and the operational concerns
+this prototype shares.
+
+- [`macaroon-thought.md`](https://github.com/superfly/macaroon/blob/main/macaroon-thought.md) —
+  design notes for Fly's `superfly/macaroon` library; the reference implementation to compare
+  against.
+- ["Macaroons Escalated Quickly"](https://fly.io/blog/macaroons-escalated-quickly/) — the
+  conceptual introduction: what macaroons are, caveats, and attenuation.
+- ["Operationalizing Macaroons"](https://fly.io/blog/operationalizing-macaroons/) — running
+  macaroon auth in production: key management, third-party caveats, and discharge.
