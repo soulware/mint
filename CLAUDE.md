@@ -1,0 +1,161 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+`mint` is macaroon-authenticated, scoped-credential vending for Tigris (an S3-compatible
+object store). The mint verifies a caller-presented macaroon against its root keyring, looks
+up a role, renders the role's IAM-policy template from the macaroon's caveats, mints a scoped
+short-lived Tigris keypair, and returns it. **The mint is never in the data path** — it hands
+out credentials, it does not proxy I/O.
+
+It is a prototype tracking the settled design in `docs/design-mint.md` (in the
+[elide repo](https://github.com/soulware/elide), alongside `docs/design-auth-service.md` and
+`docs/design-mint-template-seal.md`). It was extracted from elide and is deliberately free of
+`elide-*` dependencies — a standalone Cargo workspace destined to become its own OSS project.
+
+## Commands
+
+```sh
+cargo build && cargo test          # standard build + full test suite
+cargo test --no-fail-fast          # what CI runs
+cargo test --test assume_role      # one integration test file (tests/assume_role.rs)
+cargo test --test assume_role -- name_substring   # one test within it
+cargo fmt --check                  # CI gate
+cargo clippy --all-targets --features e2e-harness -- -D warnings   # CI gate; -D warnings is enforced
+```
+
+CI (`.github/workflows/ci.yml`) runs exactly these three: `fmt --check`, `clippy` (with
+`-D warnings`), and `test --no-fail-fast`. Clippy must be run with `--features e2e-harness` so
+the `mint-e2e` harness bin is linted too.
+
+### Conventions
+
+- Land changes via PR — never push directly to `main`.
+- Rust edition 2024.
+
+## Running it
+
+clap CLI; `--config` defaults to `mint.toml` (override with `MINT_CONFIG`). `mint serve` always
+runs against real Tigris IAM (or any S3-compatible backend speaking the IAM API) and needs an
+`AWS_*` admin credential in the environment — never in the TOML. There is **no in-process dev
+backend** on the operator/serve surface.
+
+Operator side (server host):
+```sh
+mint serve   --config examples/mint-demo.toml   # vending HTTP surface; AWS_* in env
+mint login   --config examples/mint-demo.toml   # operator session, gates the admin/discharge plane
+mint seal    --config examples/mint-demo.toml   # publish the template seal; serve is DORMANT until sealed
+mint invite  --config examples/mint-demo.toml   # print the invite macaroon (to stdout; diagnostics to stderr)
+mint enroll list / approve <sub> / revoke <sub> --config examples/mint-demo.toml
+mint role list / inspect <name> --config examples/mint-demo.toml
+```
+
+Client side (the coordinator's half; identity under `./mint_client`):
+```sh
+mint client fingerprint                         # mints identity on first use; operator compares this during approve
+mint client enroll  --id <sub> <invite>         # attenuates the invite with sub+cnf
+mint client exchange <role>                     # exits 2 until the operator approves
+mint client assume-role [--req '{...}'] [--caveat N=V] [--attest N=V] <role>
+```
+
+The **hermetic** shape (no cloud) is the `mint-e2e` harness bin: the same `serve::run` loop over
+`Store::open_local` + `iam::FakeMinter`. Built with
+`cargo build --features e2e-harness --bin mint-e2e` and spawned as a process by cross-workspace
+end-to-end tests (the elide workspace cannot link mint as a library).
+
+## Architecture
+
+### Caveat vocabulary (from the RFCs, see README)
+`aud`, `exp`, `sub` (opaque principal — a coordinator ULID), `cnf` (RFC 7800 holder-of-key,
+`ed25519:<pub>`) are standard. Mint-coined: `op` (endpoint partition — **positively required**
+at every endpoint, never absence-tested), `role`, `invite` (rotation nonce). `caveat::name` /
+`caveat::op` hold the canonical constants.
+
+### The three core invariants
+- **Fail closed on caveat ambiguity.** `caveat::EffectiveCaveats` resolves a name to a tri-state
+  — `Absent` / `Value` / `Unsatisfiable`. ≥2 disagreeing occurrences of a name are
+  `Unsatisfiable` (the append-a-contradictory-copy defence). Caveats are **named scalars**, MAC'd
+  with chained BLAKE3, base64 on the wire.
+- **Holder-of-key PoP on every operation.** `pop` is the `cnf` gate: Ed25519 over
+  `tail ‖ BLAKE3(raw-body)`, with a freshness `ts` carried in the body. Required on all three
+  mint operations.
+- **Dormant until sealed.** A daemon serves nothing from `/v1/assume-role` until an operator
+  publishes a template seal. See `seal` / `sealed_cache` below.
+
+### Request surface (`http.rs`)
+```
+POST /v1/assume-role      op=assume-role       (per request)
+POST /v1/enroll           op=enroll            (creates a pending record)
+POST /v1/enroll-exchange  op=enroll-exchange   (403 until approved)
+POST /v1/verify           discharge verification
+GET  /healthz             liveness (seal-independent)
+GET  /readyz              503 while Dormant, 200 once Serving
+```
+Auth is identical across the three mint ops: MAC against the keyring, the endpoint's required
+`op`, `aud`, and PoP. **Every auth failure is an opaque `401` with no detail** so causes can't be
+distinguished; role/caveat denial is `400`, backend failure `503`. The *only* non-401 authz
+outcome is `/v1/enroll-exchange` returning `403` for a not-yet-approved record — an awaited state.
+
+### Two flows
+**Enrollment**: `mint invite` → client attenuates `sub`+`cnf` and `POST /v1/enroll` (creates a
+pending record + short intermediate) → operator verifies the `cnf` fingerprint out of band and
+`enroll approve <sub>` → client `POST /v1/enroll-exchange` (403 until approved, then mint re-mints
+the non-expiring primary from root). `mint invite --rotate` draws a new nonce, cancelling in-flight
+enrollments; outstanding primaries are unaffected.
+
+**Vending**: client attenuates its held primary (`exp`, `elide:Volume`, …) → `POST /v1/assume-role`
++ PoP → role gate → handlebars policy render → Tigris keypair.
+
+### Module map
+- `caveat` / `macaroon` — the caveat algebra and wire format (above).
+- `pop` — the holder-of-key gate.
+- `issuance` — `mint_invite` / `mint_intermediate` / `mint_primary` (each a fresh chain from root),
+  `mint_admin_service_token`, `bound_identity`.
+- `keyring` — the **root-key keyring**: ordered `(kid, key)` generations + a `current` pointer.
+  Verification accepts any kid still in the ring; minting always uses `current`. Stored as a
+  directory of numbered files (`<data_dir>/root_keys/0000`, `…/current`) — `ls`-inspectable.
+- `state` — persisted invite nonce + transient pending table as a directory of files
+  (`invite`, `clients/pending/<sub>.json`, `clients/enrolled/<sub>`) so the lifecycle is
+  `ls`-inspectable. `Store::open_remote` (Tigris-backed, the production path), `Store::open_local`
+  / `Store::open_in_memory` (tests/harness only). Idempotent same-`(sub,pub)`, conflict on a
+  different key, GC of stale pending, consume-on-exchange.
+- `seal` / `sealed_cache` — the **template seal**: an operator-signed manifest pinning each role's
+  TTL bounds + BLAKE3 of its policy template, MAC'd under the keyring (a bucket-credential holder
+  cannot forge one). Authored by `POST /v1/admin/seal`, served from an immutable in-memory
+  `TemplateSet` — the request path never re-reads disk. `SealState` is `Serving` or `Dormant`,
+  held in an `ArcSwap` so `mint seal` swaps the served surface live, no restart.
+- `role` / `template` / `audit` — role gate, handlebars policy render, JSON audit lines. A policy
+  template substitutes values by provenance: `{{attested.X}}` (discharge-MAC'd), `{{env.X}}`
+  (config), `{{mint.X}}` (mint-computed), `{{caveat.X}}` (MAC-verified).
+- `config` — TOML (audience, `data_dir`, `roles_dir`, tenant, per-role metadata). Each role's
+  policy template is a separate file under `roles_dir` (`<name>.json`, or `policy_file`). The
+  macaroon root key is **not** config. Admin credential from `AWS_*`, never TOML.
+- `iam` — `KeypairMinter` trait; `TigrisMinter` (real, in `tigris.rs`) and `FakeMinter` (tests).
+- `tigris` / `mint_rw` — the real IAM minter, and the self-vended `mint-rw` keypair that routes
+  `_mint/*` store I/O (with a background task re-minting it before its `DateLessThan` expiry).
+- `auth` / `session` / `operator` / `admin` — the operator admin plane and the **demo-only**
+  discharge issuer. `mint login` mints a session (under `K_session`) that gates `/v1/discharge`;
+  the operator's authority is the **admin-service** machine token (written by `serve` at first
+  start) + a fresh discharge + per-call PoP. Production runs a standalone auth-service binary
+  sharing `K_M-A` with mint; `auth.rs` is its in-tree demo stand-in, mounted on its own UDS only
+  when `[auth.demo].enabled`.
+- `attest` / `tpc` — third-party-caveat (TPC) primitives and the **demo-only** attestation-discharge
+  issuer (mounted only under `[attestation.demo]`). `tpc` builds the AEAD-encrypted `(VID, CID)`
+  payload: a fresh ephemeral root `r` is sealed in VID under the chain tag `T_{n-1}` (so the verifier
+  recovers `r` from VID alone) and in CID under `K_M-A`. Production runs a real attestation authority
+  sharing `K_M-B` with mint.
+- `transport` — shared POST transport: `unix:<path>` (UDS, via hyper + hyperlocal) or
+  `http(s)://host` (TCP, via reqwest). The reference client is **UDS-only**.
+
+### Secret material
+The root keyring lives at `<data_dir>/root_keys/` (generated on first start). `K_M-A` (auth/TPC),
+`K_M-B` (attestation), and `K_session` (demo auth) are auto-generated **only in demo mode**
+(`[auth.demo]` / `[attestation.demo]`). A production instance must have them provisioned out of
+band and **fails closed if absent**. See `open_store` in `main.rs` for the gating.
+
+## Out of scope (prototype)
+TLS, multi-root / root rotation as an operation, multi-tenancy, `ListRoles`/`GetRole`, and
+third-party-caveat discharge for a central identity authority. Backup/replication of `data_dir`
+and root rotation remain open questions.
