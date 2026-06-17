@@ -37,19 +37,28 @@ the `mint-e2e` harness bin is linted too.
 
 ## Running it
 
-clap CLI; `--config` defaults to `mint.toml` (override with `MINT_CONFIG`). `mint serve` always
-runs against real Tigris IAM (or any S3-compatible backend speaking the IAM API) and needs an
-`AWS_*` admin credential in the environment — never in the TOML. There is **no in-process dev
-backend** on the operator/serve surface.
+clap CLI; `--config` defaults to `mint.toml`, overridden by the `MINT_CONFIG` env var. The
+standard setup is to copy the example config into the repo root, edit it (bucket name, etc.), and
+export `MINT_CONFIG` so no command needs `--config`:
+
+```sh
+cp examples/mint-demo.toml ./mint-demo.toml   # then edit: bucket, audience, roles, …
+export MINT_CONFIG=./mint-demo.toml
+```
+
+`./mint-demo.toml` is gitignored and is assumed by the examples below. `mint serve` always runs
+against real Tigris IAM (or any S3-compatible backend speaking the IAM API) and needs an `AWS_*`
+admin credential in the environment — never in the TOML. There is **no in-process dev backend** on
+the operator/serve surface.
 
 Operator side (server host):
 ```sh
-mint serve   --config examples/mint-demo.toml   # vending HTTP surface; AWS_* in env
-mint login   --config examples/mint-demo.toml   # operator session, gates the admin/discharge plane
-mint seal    --config examples/mint-demo.toml   # publish the template seal; serve is DORMANT until sealed
-mint invite  --config examples/mint-demo.toml   # print the invite macaroon (to stdout; diagnostics to stderr)
-mint enroll list / approve <sub> / revoke <sub> --config examples/mint-demo.toml
-mint role list / inspect <name> --config examples/mint-demo.toml
+mint serve                          # vending HTTP surface; AWS_* in env
+mint login                          # operator session, gates the admin/discharge plane
+mint seal                           # publish the template seal; serve is DORMANT until sealed
+mint invite                         # print the invite macaroon (to stdout; diagnostics to stderr)
+mint enroll list / approve <sub> / revoke <sub>
+mint role list / inspect <name>
 ```
 
 Client side (the coordinator's half; identity under `./mint_client`):
