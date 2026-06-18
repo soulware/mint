@@ -1,6 +1,15 @@
 //! Audit log (`docs/design-mint.md` § *Audit log*). One JSON object per
-//! `AssumeRole` call, appended as a line. v1 is local/file-based; sink
+//! mint operation (`assume-role`, `enroll`, `enroll-exchange`,
+//! `exchange-finalize`), appended as a line. v1 is local/file-based; sink
 //! shipping is an operational concern, not a mint concern.
+//!
+//! The schema is the union across operations — every line carries the
+//! same keys (a fixed shape for downstream ingestion). Fields that don't
+//! apply to a given line are emitted as null/empty: the role-rendering
+//! fields (`role`, `granted_ttl_seconds`, `tigris_access_key_id`) carry
+//! values only where the operation knows them — an enroll-exchange line
+//! records the identity and outcome but `tigris_access_key_id` is null
+//! (none is minted there).
 //!
 //! Caveats are recorded by name+value but never secrets — the only
 //! secret in the flow is the minted Tigris key, and that is recorded by

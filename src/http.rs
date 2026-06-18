@@ -971,14 +971,17 @@ async fn enroll_exchange(
     let request_id = uuid::Uuid::new_v4().to_string();
     let caller = peer_ip(&headers);
     let now_unix = Utc::now().timestamp().max(0) as u64;
-    let audit = |outcome: &str, caveats: &[Caveat]| {
+    // `role` is stamped once the request resolves it (the role-less early
+    // denials pass ""); no Tigris key is minted here, so the key field is
+    // always absent on these lines.
+    let audit = |outcome: &str, caveats: &[Caveat], role: &str| {
         state.audit.record(&AuditEntry {
             timestamp: Utc::now().to_rfc3339(),
             request_id: request_id.clone(),
             caller_address: caller.clone(),
             macaroon_nonce: None,
             macaroon_caveats: sanitise_caveats(caveats),
-            role: String::new(),
+            role: role.to_string(),
             granted_ttl_seconds: None,
             outcome: format!("exchange:{outcome}"),
             tigris_access_key_id: None,
@@ -992,7 +995,7 @@ async fn enroll_exchange(
     let surface = match seal.as_ref() {
         SealState::Serving(s) => s,
         SealState::Dormant => {
-            audit("denied:not_sealed", &[]);
+            audit("denied:not_sealed", &[], "");
             return not_sealed(&request_id);
         }
     };
@@ -1003,13 +1006,13 @@ async fn enroll_exchange(
     // ticket's TPC, and clears `aud`/`op=enroll-exchange`/PoP and the
     // deadline (the minimum `exp` across the ticket and the discharge).
     let Some(bundle) = extract_bundle(&headers) else {
-        audit("denied:unauthenticated", &[]);
+        audit("denied:unauthenticated", &[], "");
         return unauthorized(&request_id);
     };
     let proof = match pop_proof(&headers) {
         Ok(p) => p,
         Err(()) => {
-            audit("denied:pop", &[]);
+            audit("denied:pop", &[], "");
             return unauthorized(&request_id);
         }
     };
@@ -1025,7 +1028,7 @@ async fn enroll_exchange(
     ) {
         Ok(c) => c,
         Err(e) => {
-            audit(&format!("denied:{}", e.reason()), &[]);
+            audit(&format!("denied:{}", e.reason()), &[], "");
             return unauthorized(&request_id);
         }
     };
@@ -1038,14 +1041,14 @@ async fn enroll_exchange(
         name::SCOPE,
         scope::MINT_EXCHANGE,
     ) {
-        audit("denied:scope", &caveats);
+        audit("denied:scope", &caveats, "");
         return unauthorized(&request_id);
     }
 
     let (sub, cnf) = match issuance::bound_identity(&cleared.primary) {
         Ok(v) => v,
         Err(_) => {
-            audit("denied:identity", &caveats);
+            audit("denied:identity", &caveats, "");
             return unauthorized(&request_id);
         }
     };
@@ -1071,7 +1074,7 @@ async fn enroll_exchange(
         // else that breaks deserialisation. The fix is operator
         // re-approval, identical to the Forged path.
         Ok(_) | Err(StateError::Forged | StateError::Corrupt) => {
-            audit("awaiting_approval", &caveats);
+            audit("awaiting_approval", &caveats, "");
             return respond(
                 &request_id,
                 StatusCode::FORBIDDEN,
@@ -1095,7 +1098,7 @@ async fn enroll_exchange(
             );
         }
         Err(StateError::BadSub) => {
-            audit("denied:bad_sub", &caveats);
+            audit("denied:bad_sub", &caveats, "");
             return unauthorized(&request_id);
         }
         Err(e) => {
@@ -1103,7 +1106,7 @@ async fn enroll_exchange(
             // pending-side error); reaching this arm is the
             // unforeseen-state case. Log loudly, opaque 401 to client.
             tracing::warn!(error = %e, sub = %sub, "unexpected state error during get_enrolled");
-            audit("denied:state_error", &caveats);
+            audit("denied:state_error", &caveats, "");
             return unauthorized(&request_id);
         }
     };
@@ -1117,7 +1120,7 @@ async fn enroll_exchange(
     let role = match serde_json::from_slice::<ExchangeBody>(&body) {
         Ok(b) if surface.role(&b.role).is_some() => b.role,
         _ => {
-            audit("denied:unknown_role", &caveats);
+            audit("denied:unknown_role", &caveats, "");
             return unauthorized(&request_id);
         }
     };
@@ -1157,7 +1160,7 @@ async fn enroll_exchange(
                 state.config.attestation_location.as_deref(),
             ) else {
                 tracing::error!(role = %role, "attestation role missing K_M-B or attestation_location");
-                audit("denied:state_error", &caveats);
+                audit("denied:state_error", &caveats, &role);
                 return respond(
                     &request_id,
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -1186,7 +1189,7 @@ async fn enroll_exchange(
     // The enrolled-registry entry is not consumed: the ticket is
     // multi-use until its `exp` and the entry powers the re-enrollment
     // fast path beyond that.
-    audit("granted", &caveats);
+    audit("granted", &caveats, &role);
     respond(
         &request_id,
         StatusCode::OK,
@@ -1212,14 +1215,17 @@ async fn exchange_finalize(
     let request_id = uuid::Uuid::new_v4().to_string();
     let caller = peer_ip(&headers);
     let now_unix = Utc::now().timestamp().max(0) as u64;
-    let audit = |outcome: &str, caveats: &[Caveat]| {
+    // `role` is baked into the step-1 intermediate, so it's known for
+    // every line after it's resolved from the cleared caveats (the
+    // role-less early denials pass ""); no Tigris key is minted here.
+    let audit = |outcome: &str, caveats: &[Caveat], role: &str| {
         state.audit.record(&AuditEntry {
             timestamp: Utc::now().to_rfc3339(),
             request_id: request_id.clone(),
             caller_address: caller.clone(),
             macaroon_nonce: None,
             macaroon_caveats: sanitise_caveats(caveats),
-            role: String::new(),
+            role: role.to_string(),
             granted_ttl_seconds: None,
             outcome: format!("finalize:{outcome}"),
             tigris_access_key_id: None,
@@ -1227,13 +1233,13 @@ async fn exchange_finalize(
     };
 
     let Some(bundle) = extract_bundle(&headers) else {
-        audit("denied:unauthenticated", &[]);
+        audit("denied:unauthenticated", &[], "");
         return unauthorized(&request_id);
     };
     let proof = match pop_proof(&headers) {
         Ok(p) => p,
         Err(()) => {
-            audit("denied:pop", &[]);
+            audit("denied:pop", &[], "");
             return unauthorized(&request_id);
         }
     };
@@ -1249,7 +1255,7 @@ async fn exchange_finalize(
     ) {
         Ok(c) => c,
         Err(e) => {
-            audit(&format!("denied:{}", e.reason()), &[]);
+            audit(&format!("denied:{}", e.reason()), &[], "");
             return unauthorized(&request_id);
         }
     };
@@ -1258,7 +1264,7 @@ async fn exchange_finalize(
     let (sub, cnf) = match issuance::bound_identity(&cleared.primary) {
         Ok(v) => v,
         Err(_) => {
-            audit("denied:identity", &caveats);
+            audit("denied:identity", &caveats, "");
             return unauthorized(&request_id);
         }
     };
@@ -1268,14 +1274,14 @@ async fn exchange_finalize(
     let role = match EffectiveCaveats::new(&caveats).resolve(name::ROLE) {
         Resolved::Value(r) => r,
         _ => {
-            audit("denied:identity", &caveats);
+            audit("denied:identity", &caveats, "");
             return unauthorized(&request_id);
         }
     };
     let Some(role_cfg) = state.config.roles.get(&role) else {
         // The intermediate named a role that is no longer configured.
         tracing::error!(role = %role, "exchange-finalize for unknown role");
-        audit("denied:unknown_role", &caveats);
+        audit("denied:unknown_role", &caveats, &role);
         return unauthorized(&request_id);
     };
 
@@ -1285,7 +1291,7 @@ async fn exchange_finalize(
     let rev_epoch = match state.store.get_enrolled(&sub).await {
         Ok(Some(a)) if a.pubkey == cnf => a.rev_epoch,
         Ok(_) | Err(StateError::Forged | StateError::Corrupt) => {
-            audit("awaiting_approval", &caveats);
+            audit("awaiting_approval", &caveats, &role);
             return respond(
                 &request_id,
                 StatusCode::FORBIDDEN,
@@ -1309,12 +1315,12 @@ async fn exchange_finalize(
             );
         }
         Err(StateError::BadSub) => {
-            audit("denied:bad_sub", &caveats);
+            audit("denied:bad_sub", &caveats, &role);
             return unauthorized(&request_id);
         }
         Err(e) => {
             tracing::warn!(error = %e, sub = %sub, "unexpected state error during finalize get_enrolled");
-            audit("denied:state_error", &caveats);
+            audit("denied:state_error", &caveats, &role);
             return unauthorized(&request_id);
         }
     };
@@ -1328,7 +1334,7 @@ async fn exchange_finalize(
         match dis.resolve(n) {
             Resolved::Value(v) => baked.push((n.clone(), v)),
             _ => {
-                audit("denied:missing_attested", &caveats);
+                audit("denied:missing_attested", &caveats, &role);
                 return respond(
                     &request_id,
                     StatusCode::BAD_REQUEST,
@@ -1347,7 +1353,7 @@ async fn exchange_finalize(
         rev_epoch,
         &baked,
     );
-    audit("granted", &caveats);
+    audit("granted", &caveats, &role);
     respond(
         &request_id,
         StatusCode::OK,
