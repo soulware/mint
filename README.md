@@ -34,7 +34,7 @@ The following expressions are replaced when the policy is created from the templ
 Mint additionally supports flexible `{{caveat.<key>}}` expressions fulfilled by the client credential itself. This lets us do interesting things with both *attenuation* and *attestation* -
 
 * *attenuation* of existing credentials to further restrict a policy
-* *attestation* (by a third-party) of values within a policy, settled point-in-time at exchange
+* *attestation* (by a third-party) of policy template expression values
 
 ## Getting Started
 
@@ -66,7 +66,7 @@ op run --env-file ./mint-demo.env -- ./target/debug/mint serve
 ./target/debug/mint serve
 ```
 
-With `mint serve` still running we can then interact with it via the mint cli in a new terminal. Note that the mint server by default runs in "demo mode" with a demo authentication service available via `auth.sock` locally.
+With `mint serve` still running we can then interact with it via the mint cli in a new terminal. Note that the mint server by default runs with a demo authentication service available via `auth.sock` locally.
 
 ```bash
 export MINT_CONFIG=./mint-demo.toml
@@ -74,7 +74,7 @@ export MINT_CONFIG=./mint-demo.toml
 # Login via mint cli
 ./target/debug/mint login
 
-# "Seal" the example policy templates
+# "Seal" the example policy templates (to prevent them being tampered with)
 ./target/debug/mint seal
 
 # Display the <INVITE> for enrolling a new client
@@ -95,7 +95,7 @@ The mint cli includes a demonstration `client` sub-cmd to allow the enrollment f
 ./target/debug/mint client fingerprint
 ```
 
-Once a client has successfully enrolled with mint it can exchange its credentials for per-role long-lived "service tokens". The client can then "assume-role" swapping a service token for short-lived Tigris/S3 credentials associated with an IAM policy built from the template.
+Once a client has successfully enrolled with mint it can exchange its credentials for per-role long-lived "service tokens". The client can then "assume-role" swapping a service token for short-lived Tigris/S3 credentials associated with an IAM policy built from the associated template.
 
 ```bash
 # List the available roles (these are what we "sealed" earlier) -
@@ -108,16 +108,15 @@ Once a client has successfully enrolled with mint it can exchange its credential
 ./target/debug/mint client assume-role demo
 ```
 
-For a slightly more complex example the `demo-attested` role requires an *attestation* — supplied **at exchange time**. By default mint runs in "demo mode" with a demo attestation service available via `attest.sock` locally.
+For a more complex example the `demo-attested` template requires an attested role-specific value. By default mint runs with a demo attestation service available via `attest.sock` locally.
 
 The template for the `demo-attested` role substitutes two `{{caveat.X}}` values:
 
-* `{{caveat.sub}}` - the client identifier (issuer-stamped at enrollment)
-* `{{caveat.dir}}` - role-specific value (attested via third-party, stamped at exchange)
+* `{{caveat.sub}}` - the client identifier (defined at enrollment)
+* `{{caveat.dir}}` - role-specific value (defined at _exchange_ and attested via third-party caveat)
 
 ```bash
-# Exchange for the role-specific service token
-# passing the attested value for {{caveat.dir}} template expression
+# Exchange for the role-specific service token, passing the value to be attested for the {{caveat.dir}} template expression
 ./target/debug/mint client exchange demo-attested --attest dir=images
 
 # Assume the role to obtain short-lived Tigris access keys
