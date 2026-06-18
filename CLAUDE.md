@@ -77,8 +77,8 @@ Client side (the coordinator's half; identity under `./mint_client`):
 ```sh
 mint client fingerprint                         # mints identity on first use; operator compares this during approve
 mint client enroll  --id <sub> <invite>         # attenuates the invite with sub+cnf
-mint client exchange <role>                     # exits 2 until the operator approves
-mint client assume-role [--req '{...}'] [--caveat N=V] [--attest N=V] <role>
+mint client exchange [--attest N=V] <role>      # exits 2 until approved; --attest for an attested role (baked in here)
+mint client assume-role [--req '{...}'] [--caveat N=V] <role>   # no attestation here — the credential is a bare primary
 ```
 
 The **hermetic** shape (no cloud) is the `mint-e2e` harness bin: the same `serve::run` loop over
@@ -91,8 +91,9 @@ end-to-end tests (the elide workspace cannot link mint as a library).
 ### Caveat vocabulary (from the RFCs, see README)
 `aud`, `exp`, `sub` (opaque principal — a coordinator ULID), `cnf` (RFC 7800 holder-of-key,
 `ed25519:<pub>`) are standard. Mint-coined: `op` (endpoint partition — **positively required**
-at every endpoint, never absence-tested), `role`, `invite` (rotation nonce). `caveat::name` /
-`caveat::op` hold the canonical constants.
+at every endpoint, never absence-tested; values `enroll` / `enroll-exchange` / `exchange-finalize`
+/ `assume-role`), `role`, `epoch` (revocation generation), `invite` (rotation nonce). `caveat::name`
+/ `caveat::op` hold the canonical constants.
 
 ### The three core invariants
 - **Fail closed on caveat ambiguity.** `caveat::EffectiveCaveats` resolves a name to a tri-state
@@ -110,14 +111,16 @@ at every endpoint, never absence-tested), `role`, `invite` (rotation nonce). `ca
 POST /v1/assume-role      op=assume-role       (per request)
 POST /v1/enroll           op=enroll            (creates a pending record)
 POST /v1/enroll-exchange  op=enroll-exchange   (403 until approved)
+POST /v1/exchange-finalize op=exchange-finalize (step 2 for attested roles)
 POST /v1/verify           discharge verification
 GET  /healthz             liveness (seal-independent)
 GET  /readyz              503 while Dormant, 200 once Serving
 ```
-Auth is identical across the three mint ops: MAC against the keyring, the endpoint's required
+Auth is identical across the mint ops: MAC against the keyring, the endpoint's required
 `op`, `aud`, and PoP. **Every auth failure is an opaque `401` with no detail** so causes can't be
 distinguished; role/caveat denial is `400`, backend failure `503`. The *only* non-401 authz
-outcome is `/v1/enroll-exchange` returning `403` for a not-yet-approved record — an awaited state.
+outcome is `/v1/enroll-exchange` / `/v1/exchange-finalize` returning `403` for a not-yet-approved
+record — an awaited state.
 
 ### Two flows
 **Enrollment**: `mint invite` → client attenuates `sub`+`cnf` and `POST /v1/enroll` (creates a
@@ -127,13 +130,27 @@ the non-expiring primary from root). `mint invite --rotate` draws a new nonce, c
 enrollments; outstanding primaries are unaffected.
 
 **Vending**: client attenuates its held primary (`exp`, `elide:Volume`, …) → `POST /v1/assume-role`
-+ PoP → role gate → handlebars policy render → Tigris keypair.
++ PoP → role gate → handlebars policy render → Tigris keypair. **No attestation runs here** — the
+credential is a bare primary.
+
+**Attestation is point-in-time, at exchange.** A role declaring `[role.attestation]` exchanges in
+two steps: `POST /v1/enroll-exchange` returns a short-lived `op=exchange-finalize` *intermediate*
+carrying an undischarged attested third-party caveat; the client discharges it at the attestation
+authority and `POST /v1/exchange-finalize` **bakes** the attested values into the credential as
+ordinary MAC'd caveats. Thereafter they are indistinguishable from the issuer-stamped `sub` and
+render as `{{caveat.X}}` (there is no `{{attested.X}}` namespace). The attested names are declared
+in `[role.attestation].attested` and must be a **subset of** `[role.template].caveat`; an empty
+list is a gate-only role (a discharge is still required to finalize, but no value is baked). The
+demo attestation authority is **echo-only** — real plumbing (`K_M-B`, an `r`-bound discharge), but
+the verdict is stubbed to "approve whatever value is asked"; a production authority derives or
+validates the value from `(sub, mode)`.
 
 ### Module map
 - `caveat` / `macaroon` — the caveat algebra and wire format (above).
 - `pop` — the holder-of-key gate.
-- `issuance` — `mint_invite` / `mint_intermediate` / `mint_primary` (each a fresh chain from root),
-  `mint_admin_service_token`, `bound_identity`.
+- `issuance` — `mint_invite` / `mint_credential_ticket` / `mint_intermediate` (attested step 1) /
+  `mint_credential` (the primary; bakes the discharged attested values for attested roles) — each a
+  fresh chain from root — plus `mint_admin_service_token`, `bound_identity`.
 - `keyring` — the **root-key keyring**: ordered `(kid, key)` generations + a `current` pointer.
   Verification accepts any kid still in the ring; minting always uses `current`. Stored as a
   directory of numbered files (`<data_dir>/root_keys/0000`, `…/current`) — `ls`-inspectable.

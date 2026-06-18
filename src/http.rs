@@ -78,6 +78,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/assume-role", post(assume_role))
         .route("/v1/enroll", post(enroll))
         .route("/v1/enroll-exchange", post(enroll_exchange))
+        .route("/v1/exchange-finalize", post(exchange_finalize))
         .route("/v1/verify", post(discharge_verify))
         .with_state(state)
 }
@@ -608,33 +609,19 @@ async fn assume_role(State(state): State<AppState>, headers: HeaderMap, body: By
         );
     };
 
-    // The role's sealed substitution contract: every declared `attested`
-    // name must resolve to a single value in the discharge context, every
-    // declared `caveat` name in the primary's MAC-verified chain. Enforced
-    // here, against the sealed contract, before render — a missing input is
-    // a client fault (clean 400) rather than a render-time 500. Render's
-    // strict mode is the backstop. authorize() proved the role is in the
-    // surface, so an absent SealedRole is the same internal inconsistency
-    // the missing-policy branch above guards.
+    // The role's sealed substitution contract: every declared `caveat`
+    // name must resolve to a single value in the primary's MAC-verified
+    // chain. This now covers the attestation-baked names too — they were
+    // stamped as ordinary caveats at `exchange-finalize` — so there is no
+    // separate discharge context at `assume-role`. A holder cannot override
+    // a baked or control value: appending a contradictory copy makes the
+    // name `Unsatisfiable`, which fails this presence check closed (a clean
+    // 400) rather than substituting the forgery. authorize() proved the
+    // role is in the surface, so an absent SealedRole is the same internal
+    // inconsistency the missing-policy branch above guards.
     let eff = EffectiveCaveats::new(&caveats);
-    let dis_eff = EffectiveCaveats::new(&cleared.discharge_caveats);
     let sealed_role = surface.role(&granted.role_name);
     if let Some(sealed_role) = sealed_role {
-        for name in &sealed_role.attested {
-            if !matches!(dis_eff.resolve(name), Resolved::Value(_)) {
-                audit(entry(
-                    "denied:missing_attested",
-                    &granted.role_name,
-                    None,
-                    None,
-                ));
-                return respond(
-                    &request_id,
-                    StatusCode::BAD_REQUEST,
-                    json!({"error": "bad request"}),
-                );
-            }
-        }
         for name in &sealed_role.caveat {
             if !matches!(eff.resolve(name), Resolved::Value(_)) {
                 audit(entry(
@@ -652,19 +639,11 @@ async fn assume_role(State(state): State<AppState>, headers: HeaderMap, body: By
         }
     }
 
-    // The role's sealed `attested` contract is the registry the renderer
-    // pulls discharge values from; a role missing from the sealed surface
-    // exposes nothing (and its `{{attested.X}}` then fails the render
-    // closed).
-    let declared_attested: &[String] = sealed_role.map(|r| r.attested.as_slice()).unwrap_or(&[]);
-
     let expiry = now + chrono::Duration::seconds(granted.ttl_seconds as i64);
     let expiry_iso = expiry.to_rfc3339();
     let policy = match render_policy(
         policy_template,
         surface.env(),
-        declared_attested,
-        &cleared.discharge_caveats,
         &caveats,
         &expiry_iso,
         &granted.role_name,
@@ -681,12 +660,14 @@ async fn assume_role(State(state): State<AppState>, headers: HeaderMap, body: By
         }
     };
 
-    // The IAM policy name's scope segment reflects the role's attested
-    // values — the authoritative scope for this credential — or `global`
-    // when the role attests none.
-    let scope_values: Vec<String> = declared_attested
+    // The IAM policy name's scope segment reflects the role's attestation-
+    // baked values — now ordinary caveats on the credential, the
+    // authoritative scope for it — or `global` when the role attests none.
+    let scope_values: Vec<String> = sealed_role
+        .map(|r| r.attested.as_slice())
+        .unwrap_or(&[])
         .iter()
-        .filter_map(|name| match dis_eff.resolve(name) {
+        .filter_map(|name| match eff.resolve(name) {
             Resolved::Value(v) => Some(v),
             Resolved::Absent | Resolved::Unsatisfiable => None,
         })
@@ -1143,24 +1124,34 @@ async fn enroll_exchange(
 
     // Operator authority is exercised at the enroll/exchange gates above,
     // never at `assume-role`. A role that declares `[role.attestation]`
-    // (`docs/design-mint.md` § *Attestation contract*) additionally
-    // carries a static attested third-party caveat the attestation
-    // authority discharges at `assume-role`; every other role's
-    // credential is the uniform key-bound service token with no
-    // third-party caveat.
-    let attested = match state
+    // (`docs/design-mint.md` § *Attestation contract*) does not get its
+    // credential here: it gets a short-lived `op=exchange-finalize`
+    // *intermediate* carrying an undischarged attested third-party caveat.
+    // The holder discharges it at the attestation authority and presents
+    // the bundle to `POST /v1/exchange-finalize`, which bakes the attested
+    // values into the credential (step 2). Every other role gets the
+    // uniform key-bound credential directly, with no third-party caveat.
+    let credential = match state
         .config
         .roles
         .get(&role)
         .and_then(|r| r.attestation_mode.as_deref())
     {
-        None => None,
+        None => issuance::mint_credential(
+            &keyring,
+            &state.config.audience,
+            &sub,
+            &cnf,
+            &role,
+            rev_epoch,
+            &[],
+        ),
         Some(mode) => {
             // Config load rejects an attestation role without a location,
             // and bootstrap loads K_M-B whenever such a role exists, so a
             // gap here is an internal invariant breach, not a client
             // fault — fail closed rather than mint an undischargeable
-            // credential.
+            // intermediate.
             let (Some(k_m_b), Some(location)) = (
                 state.store.k_m_b(),
                 state.config.attestation_location.as_deref(),
@@ -1173,14 +1164,180 @@ async fn enroll_exchange(
                     json!({"error": "service unavailable"}),
                 );
             };
-            Some(issuance::AttestedTpc {
+            let attested = issuance::AttestedTpc {
                 k_m_b,
                 org_id: state.store.org_id().unwrap_or("demo"),
                 mode,
                 location,
-            })
+            };
+            issuance::mint_intermediate(
+                &keyring,
+                &state.config.audience,
+                &sub,
+                &cnf,
+                &role,
+                rev_epoch,
+                now_unix.saturating_add(issuance::INTERMEDIATE_TTL_SECONDS),
+                attested,
+            )
         }
     };
+
+    // The enrolled-registry entry is not consumed: the ticket is
+    // multi-use until its `exp` and the entry powers the re-enrollment
+    // fast path beyond that.
+    audit("granted", &caveats);
+    respond(
+        &request_id,
+        StatusCode::OK,
+        json!({ "credential": credential.encode() }),
+    )
+}
+
+/// `POST /v1/exchange-finalize` — step 2 of exchange for an attested role.
+/// The bundle is the short-lived `op=exchange-finalize` intermediate (from
+/// step 1) plus the attestation authority's discharge of its attested
+/// third-party caveat. `verify_and_clear` walks the chain under `K_M`,
+/// verifies the discharge against the intermediate's TPC, and clears
+/// `aud`/`op=exchange-finalize`/PoP/`exp`. The discharged values are then
+/// **baked** into the final `op=assume-role` credential as ordinary MAC'd
+/// caveats — point-in-time attestation, indistinguishable thereafter from
+/// the issuer-stamped `sub`. A gate-only role (empty `attested`) still
+/// requires the discharge to clear, but bakes nothing.
+async fn exchange_finalize(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let caller = peer_ip(&headers);
+    let now_unix = Utc::now().timestamp().max(0) as u64;
+    let audit = |outcome: &str, caveats: &[Caveat]| {
+        state.audit.record(&AuditEntry {
+            timestamp: Utc::now().to_rfc3339(),
+            request_id: request_id.clone(),
+            caller_address: caller.clone(),
+            macaroon_nonce: None,
+            macaroon_caveats: sanitise_caveats(caveats),
+            role: String::new(),
+            granted_ttl_seconds: None,
+            outcome: format!("finalize:{outcome}"),
+            tigris_access_key_id: None,
+        });
+    };
+
+    let Some(bundle) = extract_bundle(&headers) else {
+        audit("denied:unauthenticated", &[]);
+        return unauthorized(&request_id);
+    };
+    let proof = match pop_proof(&headers) {
+        Ok(p) => p,
+        Err(()) => {
+            audit("denied:pop", &[]);
+            return unauthorized(&request_id);
+        }
+    };
+    let keyring = state.store.keyring().await;
+    let cleared = match verify_and_clear(
+        &bundle,
+        &keyring,
+        proof,
+        &body,
+        now_unix,
+        &state.config.audience,
+        op::EXCHANGE_FINALIZE,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            audit(&format!("denied:{}", e.reason()), &[]);
+            return unauthorized(&request_id);
+        }
+    };
+    let caveats = cleared.all_caveats();
+
+    let (sub, cnf) = match issuance::bound_identity(&cleared.primary) {
+        Ok(v) => v,
+        Err(_) => {
+            audit("denied:identity", &caveats);
+            return unauthorized(&request_id);
+        }
+    };
+
+    // The role is baked into the intermediate (MAC-verified), not taken
+    // from the body — only an attested role can have reached step 2.
+    let role = match EffectiveCaveats::new(&caveats).resolve(name::ROLE) {
+        Resolved::Value(r) => r,
+        _ => {
+            audit("denied:identity", &caveats);
+            return unauthorized(&request_id);
+        }
+    };
+    let Some(role_cfg) = state.config.roles.get(&role) else {
+        // The intermediate named a role that is no longer configured.
+        tracing::error!(role = %role, "exchange-finalize for unknown role");
+        audit("denied:unknown_role", &caveats);
+        return unauthorized(&request_id);
+    };
+
+    // Re-read the enrolled record (a revoke between step 1 and step 2 must
+    // kill the finalize) and stamp its current `rev_epoch` onto the
+    // credential. Mirrors the enroll-exchange gate.
+    let rev_epoch = match state.store.get_enrolled(&sub).await {
+        Ok(Some(a)) if a.pubkey == cnf => a.rev_epoch,
+        Ok(_) | Err(StateError::Forged | StateError::Corrupt) => {
+            audit("awaiting_approval", &caveats);
+            return respond(
+                &request_id,
+                StatusCode::FORBIDDEN,
+                json!({"error": "awaiting operator approval"}),
+            );
+        }
+        Err(StateError::Io(e)) => {
+            tracing::error!(error = %e, "read enrolled (finalize)");
+            return respond(
+                &request_id,
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({"error": "service unavailable"}),
+            );
+        }
+        Err(StateError::Store(msg)) => {
+            tracing::error!(error = %msg, "read enrolled (finalize, object store)");
+            return respond(
+                &request_id,
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({"error": "service unavailable"}),
+            );
+        }
+        Err(StateError::BadSub) => {
+            audit("denied:bad_sub", &caveats);
+            return unauthorized(&request_id);
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, sub = %sub, "unexpected state error during finalize get_enrolled");
+            audit("denied:state_error", &caveats);
+            return unauthorized(&request_id);
+        }
+    };
+
+    // Bake the role's declared attested names from the authority's
+    // discharge. Each must resolve to a single value (fail closed on a
+    // missing one); a gate-only role declares none and bakes nothing.
+    let dis = EffectiveCaveats::new(&cleared.discharge_caveats);
+    let mut baked: Vec<(String, String)> = Vec::new();
+    for n in &role_cfg.attested {
+        match dis.resolve(n) {
+            Resolved::Value(v) => baked.push((n.clone(), v)),
+            _ => {
+                audit("denied:missing_attested", &caveats);
+                return respond(
+                    &request_id,
+                    StatusCode::BAD_REQUEST,
+                    json!({"error": "bad request"}),
+                );
+            }
+        }
+    }
+
     let credential = issuance::mint_credential(
         &keyring,
         &state.config.audience,
@@ -1188,12 +1345,8 @@ async fn enroll_exchange(
         &cnf,
         &role,
         rev_epoch,
-        attested,
+        &baked,
     );
-
-    // The enrolled-registry entry is not consumed: the ticket is
-    // multi-use until its `exp` and the entry powers the re-enrollment
-    // fast path beyond that.
     audit("granted", &caveats);
     respond(
         &request_id,

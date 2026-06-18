@@ -87,13 +87,19 @@ min_ttl_seconds = 60
 max_ttl_seconds = 900
 default_ttl_seconds = 300
 
+# The full manifest of `{{caveat.X}}` the policy template substitutes —
+# whatever the provenance. `project` is attestation-sourced (declared
+# below); `sub` is issuer-stamped. Attested names must be a subset of this.
 [role.template]
-caveat = ["sub"]
-attested = ["project"]
+caveat = ["project", "sub"]
 
-# Marks the role: its credential carries an attested third-party caveat
-# at attestation_location. The opaque `mode` is sealed into the caveat
-# for the attestation authority; it defaults to the role name, set it
-# only to use a distinct name for role vs mode.
+# Marks the role attested: its credential carries an attested third-party
+# caveat the authority discharges at `exchange-finalize`, where the
+# attested values are baked into the credential as ordinary caveats. The
+# opaque `mode` is sealed into the caveat for the authority; it defaults to
+# the role name, set it only to use a distinct name for role vs mode.
+# `attested` lists the names to attest (⊆ `caveat`); empty = a gate-only
+# role (a discharge is still required, but no value is baked).
 [role.attestation]
 # mode = "demo-attested"
+attested = ["project"]
