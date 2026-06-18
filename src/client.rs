@@ -62,12 +62,6 @@ pub enum ClientError {
     #[error("--caveat must be NAME=VALUE (got {0:?})")]
     BadCaveat(String),
     #[error(
-        "this credential carries an attested caveat — supply at least one \
-         `--attest NAME=VALUE` pair naming the value(s) the role requires \
-         (e.g. `--attest project=…`)"
-    )]
-    AttestRequired,
-    #[error(
         "exchange refused (401) — the credential ticket most likely expired \
          (it is short-lived). Re-run `mint client enroll …` for a fresh \
          one; your approval persists, so just `mint client exchange` again"
@@ -348,6 +342,7 @@ pub async fn exchange(
     in_file: &str,
     role: &str,
     out: &str,
+    attest: &[String],
 ) -> Result<bool, ClientError> {
     let sk = load_key(dir)?;
     let in_path = dir.join(in_file);
@@ -381,13 +376,27 @@ pub async fn exchange(
     .await?;
     match status {
         200 => {
-            let credential = json_field(&text, "credential")?;
-            if let Ok(m) = Macaroon::decode(&credential) {
+            let received = json_field(&text, "credential")?;
+            let m = Macaroon::decode(&received).map_err(|_| ClientError::BadFile("credential"))?;
+            // An attested role returns a short-lived `op=exchange-finalize`
+            // intermediate, not the credential: discharge its attested
+            // caveat and finalize (step 2) to bake the attested values in.
+            // Every other role returns the credential directly.
+            let credential = if scalar_value(&m, name::OP).as_deref() == Some(op::EXCHANGE_FINALIZE)
+            {
+                eprintln!(
+                    "  ← 200 — mint issued a short-lived intermediate for attested role `{role}`:"
+                );
+                describe("intermediate (step 1 of 2)", &m);
+                let attest = parse_caveats(attest)?;
+                finalize_attested(base_url, &m, &attest, &sk).await?
+            } else {
                 eprintln!(
                     "  ← 200 — mint re-minted a credential from its root (a fresh chain, not an attenuation of the ticket):"
                 );
                 describe("credential (what you received)", &m);
-            }
+                received
+            };
             save_macaroon(dir, out, &credential)?;
             eprintln!("  saved to {}", dir.join(out).display());
             Ok(true)
@@ -403,6 +412,50 @@ pub async fn exchange(
         401 => Err(ClientError::TicketRejected),
         _ => Err(ClientError::Server { status, body: text }),
     }
+}
+
+/// Resolve a scalar caveat's single value off a macaroon, or `None` if
+/// absent or contradictory (the same fail-closed resolution mint uses).
+fn scalar_value(m: &Macaroon, name: &str) -> Option<String> {
+    match crate::caveat::EffectiveCaveats::new(m.caveats()).resolve(name) {
+        crate::caveat::Resolved::Value(v) => Some(v),
+        _ => None,
+    }
+}
+
+/// Step 2 of an attested exchange: discharge the intermediate's attested
+/// third-party caveat (attesting the `--attest` pairs) and present the
+/// bundle to `POST /v1/exchange-finalize`, which bakes the attested values
+/// into the final credential. Returns the encoded credential.
+async fn finalize_attested(
+    base_url: &str,
+    intermediate: &Macaroon,
+    attest: &[(String, String)],
+    sk: &SigningKey,
+) -> Result<String, ClientError> {
+    let discharges = attest_discharges(intermediate, attest).await?;
+    eprintln!(
+        "  → POST {base_url}/v1/exchange-finalize  (signed with your client key — proof-of-possession)"
+    );
+    let body = format!(r#"{{"ts":{}}}"#, now_unix());
+    let (status, text) = post_bundle(
+        base_url,
+        "/v1/exchange-finalize",
+        intermediate,
+        &discharges,
+        sk,
+        body,
+    )
+    .await?;
+    if status != 200 {
+        return Err(ClientError::Server { status, body: text });
+    }
+    let credential = json_field(&text, "credential")?;
+    if let Ok(m) = Macaroon::decode(&credential) {
+        eprintln!("  ← 200 — mint baked the attested value(s) into your credential:");
+        describe("credential (what you received)", &m);
+    }
+    Ok(credential)
 }
 
 /// Parse `NAME=VALUE` narrowing-caveat args. mint is
@@ -445,22 +498,19 @@ fn build_request_body(
 
 /// `mint client assume-role`: attenuate the held credential (the
 /// bounding `exp` from `ttl`, plus any caller-supplied narrowing
-/// caveats), fetch an attestation discharge if the credential carries
-/// an attested third-party caveat, exercise it. Returns the raw keypair
-/// JSON to print.
-#[allow(clippy::too_many_arguments)]
+/// caveats) and exercise it. The credential is a bare primary — any
+/// attestation was discharged and baked in at exchange — so no discharge
+/// is fetched here. Returns the raw keypair JSON to print.
 pub async fn assume_role(
     dir: &Path,
     base_url: &str,
     role: &str,
     request_src: Option<&str>,
     caveats: &[String],
-    attest: &[String],
     ttl_seconds: u64,
     in_file: &str,
 ) -> Result<String, ClientError> {
     let caveats = parse_caveats(caveats)?;
-    let attest = parse_caveats(attest)?;
     let sk = load_key(dir)?;
     let in_path = dir.join(in_file);
     let mut mac = Macaroon::decode(
@@ -489,17 +539,12 @@ pub async fn assume_role(
         caveats.len()
     );
 
-    // Operator authority was exercised at enrollment, not here. A role
-    // with an attestation contract carries a static attested third-party
-    // caveat (`docs/design-mint.md` § *Attestation contract*): fetch its
-    // discharge — attesting the `--attest` pairs — from the attestation
-    // authority and present it alongside; every other credential is a
+    // The credential carries no third-party caveat — any attestation was
+    // discharged and baked in at exchange — so `assume-role` presents a
     // bare primary with no discharge.
-    let discharges = attest_discharges(&mac, &attest).await?;
     eprintln!("  → POST {base_url}/v1/assume-role");
     let body = build_request_body(request_src, role, ttl_seconds, now_unix())?;
-    let (status, text) =
-        post_bundle(base_url, "/v1/assume-role", &mac, &discharges, &sk, body).await?;
+    let (status, text) = post_bundle(base_url, "/v1/assume-role", &mac, &[], &sk, body).await?;
     if status != 200 {
         return Err(ClientError::Server { status, body: text });
     }
@@ -525,12 +570,11 @@ async fn attest_discharges(
         return Ok(Vec::new());
     }
     // The authority refuses an empty attestation (`nothing to attest`);
-    // fail fast with the actionable flag rather than round-tripping to a
-    // 400. The client doesn't hold the role's contract, so it names the
-    // flag, not the specific values.
-    if attest.is_empty() {
-        return Err(ClientError::AttestRequired);
-    }
+    // An empty `--attest` is not pre-rejected here: a gate-only role
+    // (empty `attested` contract) legitimately discharges its TPC with no
+    // values. A values-required role that is handed none gets a clean 400
+    // from `exchange-finalize` (the client does not hold the contract, so
+    // it cannot tell the two apart up front).
     let session = crate::session::load_session()?;
     let transport = crate::session::load_attest_transport()?;
     let attested: std::collections::BTreeMap<String, String> = attest.iter().cloned().collect();
@@ -826,25 +870,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attest_discharges_guards_empty_attest_before_round_trip() {
-        // A credential carrying an attested TPC but no `--attest` pairs
-        // fails fast with the actionable flag — no session/transport load,
-        // no 400 round-trip to the authority.
-        let with_tpc = crate::macaroon::mint(
-            &crate::keyring::Keyring::single([7u8; 32]),
-            vec![Caveat::third_party(
-                "https://attest.example/v1/discharge",
-                vec![1u8; 28],
-                vec![2u8; 60],
-            )],
-        );
-        assert!(matches!(
-            attest_discharges(&with_tpc, &[]).await,
-            Err(ClientError::AttestRequired)
-        ));
-
+    async fn attest_discharges_skips_when_no_tpc() {
         // A credential with no TPC yields an empty list regardless of
-        // `--attest`, touching neither session nor transport.
+        // `--attest`, touching neither session nor transport. (An empty
+        // `--attest` is no longer pre-rejected — a gate-only role
+        // discharges its TPC with no values; the authority/finalize enforce
+        // the values a values-required role needs.)
         let no_tpc = crate::macaroon::mint(
             &crate::keyring::Keyring::single([7u8; 32]),
             vec![Caveat::scalar(name::OP, "assume-role")],
@@ -873,7 +904,7 @@ mod tests {
             "ed25519:k",
             "write",
             0,
-            None,
+            &[],
         );
         save_macaroon(dir, &credential_path("write"), &cred.encode()).unwrap();
         assert!(credential_list(dir).is_ok());

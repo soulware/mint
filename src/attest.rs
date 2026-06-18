@@ -109,9 +109,9 @@ async fn issue_discharge(
         Ok(r) => r,
         Err(_) => return error(StatusCode::BAD_REQUEST, "bad request"),
     };
-    if req.attested.is_empty() {
-        return error(StatusCode::BAD_REQUEST, "nothing to attest");
-    }
+    // An empty attestation is allowed: a gate-only role (empty `attested`
+    // contract) discharges its TPC to prove the authority vouched, but
+    // bakes no value — the discharge then carries only its `exp`.
     // Each authority emits only its own vocabulary: a requested name
     // that collides with a reserved control-caveat name is refused, so
     // an attestation discharge can never carry the primary's control

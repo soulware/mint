@@ -85,6 +85,11 @@ pub mod scope {
 pub mod op {
     pub const ENROLL: &str = "enroll";
     pub const ENROLL_EXCHANGE: &str = "enroll-exchange";
+    /// Step 2 of exchange for an attested role: the partition of the
+    /// short-lived **intermediate** that carries an undischarged attested
+    /// third-party caveat. `POST /v1/exchange-finalize` discharges it and
+    /// bakes the attested values into the final `assume-role` credential.
+    pub const EXCHANGE_FINALIZE: &str = "exchange-finalize";
     pub const ASSUME_ROLE: &str = "assume-role";
     /// Demo auth-role session (`docs/design-auth-service.md` § *Login
     /// flow*). MAC'd under `K_session`, never `K_M`; partitions the

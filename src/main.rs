@@ -133,6 +133,12 @@ enum ClientCmd {
         /// Defaults to `credentials/<role>`.
         #[arg(long)]
         out: Option<String>,
+        /// Value for the attestation authority to attest (repeatable) —
+        /// the names the role's `[role.attestation]` declares, baked into
+        /// the credential as `{{caveat.X}}`. Vocabulary-agnostic; required
+        /// for an attested role (a gate-only role takes none).
+        #[arg(long = "attest", value_name = "NAME=VALUE")]
+        attest: Vec<String>,
         /// Role to exchange the ticket for. One credential per role —
         /// run `exchange` once per role you are authorized for.
         #[arg(value_name = "ROLE")]
@@ -162,12 +168,6 @@ enum ClientCmd {
         /// Vocabulary-agnostic — e.g. `--caveat exp=1750000000`.
         #[arg(long = "caveat", value_name = "NAME=VALUE")]
         caveat: Vec<String>,
-        /// Value for the attestation authority to attest (repeatable) —
-        /// the names the role's policy substitutes as `{{attested.X}}`.
-        /// Vocabulary-agnostic; required when the credential carries an
-        /// attested third-party caveat.
-        #[arg(long = "attest", value_name = "NAME=VALUE")]
-        attest: Vec<String>,
         #[arg(long, default_value_t = 900)]
         ttl: u64,
         /// Role name from the mint config.
@@ -300,10 +300,11 @@ async fn client_cmd(
             role,
             in_file,
             out,
+            attest,
         } => {
             let transport = client_transport(socket)?;
             let out = out.unwrap_or_else(|| mint::client::credential_path(&role));
-            if mint::client::exchange(&dir, &transport, &in_file, &role, &out).await? {
+            if mint::client::exchange(&dir, &transport, &in_file, &role, &out, &attest).await? {
                 Ok(())
             } else {
                 eprintln!(
@@ -321,7 +322,6 @@ async fn client_cmd(
             in_file,
             req,
             caveat,
-            attest,
             ttl,
             role,
         } => {
@@ -333,7 +333,6 @@ async fn client_cmd(
                 &role,
                 req.as_deref(),
                 &caveat,
-                &attest,
                 ttl,
                 &in_file,
             )
@@ -925,7 +924,6 @@ fn print_policy_surface(template: &str) {
     let surface = mint::template::template_surface(template);
     eprintln!("  policy references:");
     for (label, vals) in [
-        ("attested (discharge-MAC'd)", &surface.attested),
         ("env (config)", &surface.env),
         ("mint (mint-computed)", &surface.mint),
         ("caveat (MAC-verified)", &surface.caveat),

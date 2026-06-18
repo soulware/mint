@@ -46,8 +46,9 @@ max_ttl_seconds = 3600
 default_ttl_seconds = 900
 policy_file = "writer.json"
 [role.template]
-attested = ["project"]
+caveat = ["project"]
 [role.attestation]
+attested = ["project"]
 "#;
 
 fn config() -> Config {
@@ -55,7 +56,7 @@ fn config() -> Config {
         TOML,
         &[(
             "writer.json",
-            r#"{"Version":"2012-10-17","Statement":[{"Resource":["arn:aws:s3:::demo-bucket/{{attested.project}}/*"]}]}"#,
+            r#"{"Version":"2012-10-17","Statement":[{"Resource":["arn:aws:s3:::demo-bucket/{{caveat.project}}/*"]}]}"#,
         )],
     )
 }
@@ -176,6 +177,10 @@ async fn full_flow_over_unix_socket() {
     // exchange before approval: not a failure, just not yet approved.
     let role = "writer";
     let cred = mint::client::credential_path(role);
+    // `writer` is an attested role, so exchange is two-step and the attested
+    // value is supplied here (baked into the credential at finalize). The
+    // pre-approval exchange returns 403 before reaching attestation.
+    let attest = ["project=apollo".to_string()];
     assert!(
         !mint::client::exchange(
             cdir.path(),
@@ -183,13 +188,16 @@ async fn full_flow_over_unix_socket() {
             mint::client::CREDENTIAL_TICKET_FILE,
             role,
             &cred,
+            &attest,
         )
         .await
         .expect("exchange call over uds"),
         "unapproved exchange must report not-yet-approved, not error",
     );
 
-    // Operator approves, then exchange yields the credential.
+    // Operator approves, then exchange runs the two-step finalize over the
+    // sockets: the client detects the intermediate's attested TPC, fetches
+    // the discharge from the attest socket, and bakes `project=apollo` in.
     let (cnf, _fp) = mint::client::identity(cdir.path()).expect("client identity");
     let now_iso = chrono::Utc::now().to_rfc3339();
     store
@@ -203,17 +211,16 @@ async fn full_flow_over_unix_socket() {
             mint::client::CREDENTIAL_TICKET_FILE,
             role,
             &cred,
+            &attest,
         )
         .await
         .expect("post-approval exchange over uds"),
     );
 
-    // assume-role returns the (fake) keypair JSON — the full chain
-    // verified and a scoped credential minted, all over the sockets:
-    // the client detects the credential's attested TPC, fetches the
-    // discharge from the attest socket, and presents the bundle.
-    let attest = ["project=apollo".to_string()];
-    let kp = mint::client::assume_role(cdir.path(), &url, role, None, &[], &attest, 900, &cred)
+    // assume-role returns the (fake) keypair JSON — the full chain verified
+    // and a scoped credential minted over the sockets. The credential is a
+    // bare primary (attestation was baked in at exchange), so no discharge.
+    let kp = mint::client::assume_role(cdir.path(), &url, role, None, &[], 900, &cred)
         .await
         .expect("assume-role over uds");
     let v: serde_json::Value = serde_json::from_str(&kp).expect("keypair json");

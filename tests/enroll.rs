@@ -61,8 +61,9 @@ max_ttl_seconds = 2592000
 default_ttl_seconds = 2592000
 policy_file = "volume-ro.json"
 [role.template]
-attested = ["volume"]
+caveat = ["volume"]
 [role.attestation]
+attested = ["volume"]
 [[role]]
 name = "volume-rw"
 min_ttl_seconds = 60
@@ -79,7 +80,7 @@ const POLICY: &str = r#"
   "Statement": [{
     "Effect": "Allow",
     "Action": ["s3:GetObject"],
-    "Resource": ["arn:aws:s3:::{{env.bucket}}/by_id/{{attested.volume}}/*"],
+    "Resource": ["arn:aws:s3:::{{env.bucket}}/by_id/{{caveat.volume}}/*"],
     "Condition": {"DateLessThan": {"aws:CurrentTime": "{{mint.expiry}}"}}
   }]
 }
@@ -164,7 +165,9 @@ fn far_future() -> u64 {
 }
 
 /// The operator-discharge scope a gate-bearing primary needs, inferred
-/// from its `op`. `assume-role` (a TPC-free credential) needs none.
+/// from its `op`. Returns `None` for an `exchange-finalize` intermediate
+/// (whose TPC the attestation authority discharges, not an operator) and
+/// for a bare `assume-role` credential (no TPC at all).
 fn gate_scope(m: &Macaroon) -> Option<&'static str> {
     match EffectiveCaveats::new(m.caveats()).resolve(name::OP) {
         Resolved::Value(v) if v == op::ENROLL => Some(scope::MINT_ENROLL),
@@ -211,9 +214,9 @@ fn volume_discharge(cid: &[u8]) -> Macaroon {
 
 /// Build a signed request, presenting the primary plus a fresh discharge
 /// for each TPC the primary carries — an operator discharge for the
-/// enroll/exchange gates, an attestation discharge for an assume-role
-/// credential's volume TPC. The PoP signs the body under the *primary's*
-/// tail, as the client does.
+/// enroll/exchange gates, an attestation discharge for an
+/// `exchange-finalize` intermediate's volume TPC. The PoP signs the body
+/// under the *primary's* tail, as the client does.
 fn signed(uri: &str, m: &Macaroon, seed: &[u8; 32], extra: &str) -> Request<Body> {
     let body = format!("{{\"ts\":{}{extra}}}", now());
     let sig = pop::client_signature(&SigningKey::from_bytes(seed), m.tail(), body.as_bytes());
@@ -221,8 +224,9 @@ fn signed(uri: &str, m: &Macaroon, seed: &[u8; 32], extra: &str) -> Request<Body
     for c in m.caveats() {
         if let Caveat::ThirdParty { cid, .. } = c {
             // An enroll/exchange anchor carries a gate TPC the operator
-            // discharges; an assume-role credential carries the volume
-            // role's attested TPC the attestation coordinator discharges.
+            // discharges; an exchange-finalize intermediate carries the
+            // volume role's attested TPC the attestation coordinator
+            // discharges.
             let discharge = match gate_scope(m) {
                 Some(scope) => gate_discharge(cid, scope),
                 None => volume_discharge(cid),
@@ -316,7 +320,9 @@ async fn full_flow_enroll_approve_exchange_then_assume_role() {
         .await
         .unwrap();
 
-    // (4) exchange → non-expiring, role-stamped credential
+    // (4) exchange the attested `volume-ro` role → a short-lived
+    // intermediate (op=exchange-finalize) carrying the volume attested TPC,
+    // step 1 of two.
     let (status, body) = parts(
         app.clone()
             .oneshot(signed(
@@ -330,6 +336,34 @@ async fn full_flow_enroll_approve_exchange_then_assume_role() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
+    let intermediate = field(&body, "credential");
+    assert!(intermediate.verify(&Keyring::single(ROOT)));
+    assert_eq!(
+        EffectiveCaveats::new(intermediate.caveats()).resolve(name::OP),
+        Resolved::Value(op::EXCHANGE_FINALIZE.into())
+    );
+    assert_eq!(
+        tpc_count(&intermediate),
+        1,
+        "intermediate carries the volume attested TPC"
+    );
+
+    // (4b) finalize → the credential, with the attested volume baked in as
+    // an ordinary caveat. `signed` attaches the attestation discharge for
+    // the intermediate's TPC.
+    let (status, body) = parts(
+        app.clone()
+            .oneshot(signed(
+                "/v1/exchange-finalize",
+                &intermediate,
+                &CLIENT_SEED,
+                "",
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "finalize body: {body}");
     let credential = field(&body, "credential");
     assert!(credential.verify(&Keyring::single(ROOT)));
     let eff = EffectiveCaveats::new(credential.caveats());
@@ -343,6 +377,12 @@ async fn full_flow_enroll_approve_exchange_then_assume_role() {
         Resolved::Value(pop::cnf_value(&SigningKey::from_bytes(&CLIENT_SEED)))
     );
     assert_eq!(eff.resolve(name::ROLE), Resolved::Value("volume-ro".into()));
+    assert_eq!(
+        eff.resolve("volume"),
+        Resolved::Value(VOLUME.into()),
+        "the attested volume is baked into the credential"
+    );
+    assert_eq!(tpc_count(&credential), 0, "credential carries no TPC");
     assert_eq!(eff.min_bound(name::EXP), None, "credential does not expire");
 
     // ticket is multi-use: the SAME ticket, same approval, exchanged
@@ -383,9 +423,9 @@ async fn full_flow_enroll_approve_exchange_then_assume_role() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     // (5) attenuate the credential and assume a role with it. The
-    // credential carries the volume role's attested TPC (stamped at
-    // exchange); `signed` attaches the attestation discharge that vouches
-    // the target volume, which the policy renders as `{{attested.volume}}`.
+    // credential is a bare primary — the attested volume was baked in at
+    // finalize — so `signed` attaches no discharge, and the policy renders
+    // the baked value as `{{caveat.volume}}`.
     let req = credential.attenuate(Caveat::scalar(name::EXP, far_future().to_string()));
     let (status, body) = parts(
         app.oneshot(signed(
@@ -750,8 +790,9 @@ async fn gates_carry_tpc_but_credential_does_not() {
         "non-attested role: credential carries no TPC"
     );
 
-    // An attested role (`volume-ro`) instead yields a credential carrying
-    // exactly the volume attested TPC the attestation coordinator clears.
+    // An attested role (`volume-ro`) instead yields a short-lived
+    // intermediate carrying exactly the volume attested TPC the attestation
+    // coordinator clears at exchange-finalize.
     let (status, body) = parts(
         app.oneshot(signed(
             "/v1/enroll-exchange",
@@ -764,11 +805,15 @@ async fn gates_carry_tpc_but_credential_does_not() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    let attested_credential = field(&body, "credential");
+    let intermediate = field(&body, "credential");
     assert_eq!(
-        tpc_count(&attested_credential),
+        EffectiveCaveats::new(intermediate.caveats()).resolve(name::OP),
+        Resolved::Value(op::EXCHANGE_FINALIZE.into())
+    );
+    assert_eq!(
+        tpc_count(&intermediate),
         1,
-        "attested role: credential carries the volume TPC"
+        "attested role: intermediate carries the volume TPC"
     );
 }
 

@@ -12,12 +12,11 @@ use mint::caveat::{Caveat, name, op};
 use mint::config::Config;
 use mint::http::{AppState, router};
 use mint::iam::FakeMinter;
-use mint::issuance::{AttestedTpc, mint_credential};
+use mint::issuance::mint_credential;
 use mint::keyring::Keyring;
-use mint::macaroon::{KeyRef, Macaroon, mint, mint_under_key_with_nonce};
+use mint::macaroon::{Macaroon, mint};
 use mint::pop;
 use mint::state::Store;
-use mint::tpc;
 use tower::ServiceExt;
 
 mod common;
@@ -26,14 +25,10 @@ const ROOT: [u8; 32] = [42u8; 32];
 /// Stands in for the client's Ed25519 identity-key seed.
 const CLIENT_SEED: [u8; 32] = [7u8; 32];
 const SUB: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
-/// The attestation-coordinator wrapping key, shared mint↔coord B. The
-/// test plays coord B to mint the discharge.
-const K_M_B: [u8; 32] = [21u8; 32];
-const ORG_ID: &str = "demo";
-const ATTEST_LOCATION: &str = "https://coord-b.example/v1/discharge";
-/// The target volume. It is **attested by the discharge**, not
-/// self-asserted: the test's coord B stamps it as the discharge's
-/// `volume` caveat, which the policy substitutes as `{{attested.volume}}`.
+/// The target volume. It is **attestation-baked**: `exchange-finalize`
+/// stamped it onto the credential as a `volume` caveat, which the policy
+/// substitutes as `{{caveat.volume}}`. These tests construct credentials
+/// the way finalize would, then exercise the bare-primary assume-role path.
 const VOLUME: &str = "01JQAAAAAAAAAAAAAAAAAAAAAA";
 
 fn config() -> Config {
@@ -55,8 +50,9 @@ max_ttl_seconds = 2592000
 default_ttl_seconds = 2592000
 policy_file = "volume-ro.json"
 [role.template]
-attested = ["volume"]
+caveat = ["volume"]
 [role.attestation]
+attested = ["volume"]
 "#;
 
 const POLICY: &str = r#"
@@ -66,7 +62,7 @@ const POLICY: &str = r#"
     "Effect": "Allow",
     "Action": ["s3:GetObject"],
     "Resource": [
-      "arn:aws:s3:::{{env.bucket}}/by_id/{{attested.volume}}/*"
+      "arn:aws:s3:::{{env.bucket}}/by_id/{{caveat.volume}}/*"
     ],
     "Condition": {"DateLessThan": {"aws:CurrentTime": "{{mint.expiry}}"}}
   }]
@@ -130,10 +126,10 @@ fn far_future() -> u64 {
     (chrono::Utc::now().timestamp() as u64) + 365 * 24 * 3600
 }
 
-/// A held `volume-ro` credential (op=assume-role, aud, sub, cnf, role)
-/// carrying the attested third-party caveat its role declares, attenuated
-/// per request with a tighter `exp`. The target volume is not on the
-/// credential at all — it is attested by a discharge at request time.
+/// A held `volume-ro` credential (op=assume-role, aud, sub, cnf, role,
+/// epoch) with the attestation-baked `volume` caveat — exactly what
+/// `exchange-finalize` produces — attenuated per request with a tighter
+/// `exp`. A bare primary: no third-party caveat, no discharge.
 fn request_macaroon() -> Macaroon {
     request_macaroon_at_epoch(0)
 }
@@ -146,48 +142,30 @@ fn request_macaroon_at_epoch(rev_epoch: u64) -> Macaroon {
         &pop::cnf_value(&SigningKey::from_bytes(&CLIENT_SEED)),
         "volume-ro",
         rev_epoch,
-        Some(AttestedTpc {
-            k_m_b: &K_M_B,
-            org_id: ORG_ID,
-            mode: "volume-ro",
-            location: ATTEST_LOCATION,
-        }),
+        &[("volume".to_string(), VOLUME.to_string())],
     )
     .attenuate(Caveat::scalar(name::EXP, far_future().to_string()))
 }
 
-/// Mint the discharge for `primary`'s attested TPC the way coord B would:
-/// recover `r` from the CID under `K_M-B`, then mint a discharge rooted at
-/// it attesting `volume = VOLUME`. Returns `None` if `primary` carries no
-/// TPC (a hand-built credential in a negative test).
-fn discharge_for(primary: &Macaroon) -> Option<Macaroon> {
-    let cid = primary.caveats().iter().find_map(|c| match c {
-        Caveat::ThirdParty { cid, .. } => Some(cid.clone()),
-        _ => None,
-    })?;
-    let pt = tpc::decrypt_cid_attested(&K_M_B, &cid).expect("recover r from attested cid");
-    Some(mint_under_key_with_nonce(
-        &pt.r,
-        KeyRef::Discharge,
-        tpc::ticket_id(&cid),
-        vec![
-            Caveat::scalar("volume", VOLUME),
-            Caveat::scalar(name::EXP, far_future().to_string()),
-        ],
-    ))
+/// A `volume-ro` credential **without** the baked `volume` caveat — what a
+/// misconfigured finalize (or a forgery attempt) would leave; the
+/// caveat-presence check must reject it before render.
+fn request_macaroon_without_volume() -> Macaroon {
+    mint_credential(
+        &Keyring::single(ROOT),
+        "mint",
+        SUB,
+        &pop::cnf_value(&SigningKey::from_bytes(&CLIENT_SEED)),
+        "volume-ro",
+        0,
+        &[],
+    )
+    .attenuate(Caveat::scalar(name::EXP, far_future().to_string()))
 }
 
-/// Sign and send an assume-role request, auto-attaching the coord-B
-/// discharge whenever the primary carries an attested TPC.
+/// Sign and send an assume-role request with the bare credential — no
+/// discharge (the credential carries no third-party caveat).
 fn signed_request(m: &Macaroon, inner_fields: &str) -> Request<Body> {
-    signed_request_with_discharge(m, discharge_for(m).as_ref(), inner_fields)
-}
-
-fn signed_request_with_discharge(
-    m: &Macaroon,
-    discharge: Option<&Macaroon>,
-    inner_fields: &str,
-) -> Request<Body> {
     let ts = chrono::Utc::now().timestamp() as u64;
     let body = format!("{{\"ts\":{ts},{inner_fields}}}");
     let sig = pop::client_signature(
@@ -195,15 +173,10 @@ fn signed_request_with_discharge(
         m.tail(),
         body.as_bytes(),
     );
-    let mut auth = format!("MintV1 {}", m.encode());
-    if let Some(d) = discharge {
-        auth.push(',');
-        auth.push_str(&d.encode());
-    }
     Request::builder()
         .method("POST")
         .uri("/v1/assume-role")
-        .header("authorization", auth)
+        .header("authorization", format!("MintV1 {}", m.encode()))
         .header("x-mint-pop", sig)
         .header("content-type", "application/json")
         .body(Body::from(body))
@@ -229,7 +202,7 @@ async fn happy_path_mints_scoped_keypair() {
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert!(body.contains("tid_fake_00000000"), "body: {body}");
 
-    // The rendered policy scopes to the discharge's **attested** volume,
+    // The rendered policy scopes to the attestation-baked volume,
     // substituted verbatim into the by_id prefix.
     let calls = minter.calls();
     assert_eq!(calls.len(), 1);
@@ -246,40 +219,18 @@ async fn happy_path_mints_scoped_keypair() {
 }
 
 #[tokio::test]
-async fn missing_attested_value_is_rejected_before_render() {
-    // A fully authorized request (gate passes) presenting a discharge that
-    // verifies but omits the `volume` the role declares in its sealed
-    // `attested` contract. The request-time contract check rejects it with
-    // a clean 400 before render — no unscoped credential is ever minted.
-    // This pins the fail-closed property now that scoping is attested.
+async fn missing_caveat_value_is_rejected_before_render() {
+    // A fully authorized request (gate passes) whose credential is missing
+    // the `volume` caveat the role declares in its sealed `caveat` contract
+    // (a misconfigured finalize, or a forgery attempt). The request-time
+    // contract check rejects it with a clean 400 before render — no
+    // unscoped credential is ever minted. This pins the fail-closed
+    // property now that the attested value is a baked caveat.
     let (state, audit_buf, minter, _dir) = state_with_audit().await;
     let app = router(state);
-    let m = request_macaroon();
+    let m = request_macaroon_without_volume();
 
-    // A discharge rooted at the right `r` but attesting no `volume`.
-    let cid = m
-        .caveats()
-        .iter()
-        .find_map(|c| match c {
-            Caveat::ThirdParty { cid, .. } => Some(cid.clone()),
-            _ => None,
-        })
-        .expect("attested TPC present");
-    let r = tpc::decrypt_cid_attested(&K_M_B, &cid)
-        .expect("recover r")
-        .r;
-    let bare_discharge = mint_under_key_with_nonce(
-        &r,
-        KeyRef::Discharge,
-        tpc::ticket_id(&cid),
-        vec![Caveat::scalar(name::EXP, far_future().to_string())],
-    );
-
-    let req = signed_request_with_discharge(
-        &m,
-        Some(&bare_discharge),
-        r#""role":"volume-ro","ttl_seconds":3600"#,
-    );
+    let req = signed_request(&m, r#""role":"volume-ro","ttl_seconds":3600"#);
     let (status, body) = body_string(app.oneshot(req).await.unwrap()).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
     // Nothing was minted, and the contract check (not render) is what
@@ -287,7 +238,7 @@ async fn missing_attested_value_is_rejected_before_render() {
     assert!(minter.calls().is_empty(), "no keypair should be minted");
     let audit = String::from_utf8(audit_buf.lock().unwrap().clone()).unwrap();
     assert!(
-        audit.contains("\"outcome\":\"denied:missing_attested\""),
+        audit.contains("\"outcome\":\"denied:missing_caveat\""),
         "audit: {audit}"
     );
 }

@@ -4,7 +4,7 @@
     "Sid": "DemoAttested",
     "Effect": "Allow",
     "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
-    "Resource": ["arn:aws:s3:::{{env.bucket}}/{{env.prefix}}/{{caveat.sub}}/{{attested.project}}/*"],
+    "Resource": ["arn:aws:s3:::{{env.bucket}}/{{env.prefix}}/{{caveat.sub}}/{{caveat.project}}/*"],
     "Condition": {
       "DateLessThan": {"aws:CurrentTime": "{{mint.expiry}}"}
     }

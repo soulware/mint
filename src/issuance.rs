@@ -13,8 +13,12 @@
 //!    attenuated) invite has verified and a pending record exists.
 //!    Carries the self-asserted `sub`/`cnf` forward.
 //! 3. [`mint_credential`] — `op=assume-role`, non-expiring, minted at
-//!    `POST /v1/enroll-exchange` after operator approval. Same
-//!    `sub`/`cnf`; no `exp`.
+//!    `POST /v1/enroll-exchange` after operator approval (non-attested
+//!    roles) or at `POST /v1/exchange-finalize` (attested roles, with the
+//!    attested values baked in). Same `sub`/`cnf`; no `exp`.
+//! 4. [`mint_intermediate`] — `op=exchange-finalize`, short-lived, minted
+//!    at `POST /v1/enroll-exchange` for an attested role. Carries the
+//!    undischarged attested third-party caveat; step 1 of two.
 //!
 //! MAC verification, the `op`/`aud`/`invite` gates, the holder-of-key
 //! PoP and the pending/approval lookup are the HTTP layer's job (they
@@ -132,6 +136,11 @@ pub struct AttestedTpc<'a> {
     pub location: &'a str,
 }
 
+/// The lifetime of the attested **intermediate** ([`mint_intermediate`]):
+/// the holder discharges it and finalizes immediately, so it is short —
+/// a window for one attestation round-trip, not a held credential.
+pub const INTERMEDIATE_TTL_SECONDS: u64 = 600;
+
 /// The non-expiring credential, re-minted from root at a successful
 /// exchange: `op=assume-role`, `aud`, the same `sub`/`cnf`, the
 /// `role` it was authorized for, the enrolled record's `rev_epoch` as
@@ -146,10 +155,12 @@ pub struct AttestedTpc<'a> {
 /// revoke bumps the enrolled record's epoch, so a credential minted
 /// before it carries a now-stale value and can never clear again.
 ///
-/// `attested` is `Some` exactly for a role declaring `[role.attestation]`:
-/// the credential then carries a static attested third-party caveat that
-/// the attestation authority discharges at `assume-role`. Most roles pass
-/// `None` and get the uniform key-bound credential.
+/// `baked_attested` carries the attestation-sourced `(name, value)` pairs
+/// for a role declaring `[role.attestation]`, resolved from the authority's
+/// discharge at `POST /v1/exchange-finalize` and stamped here as ordinary
+/// MAC'd scalar caveats — point-in-time, indistinguishable thereafter from
+/// the issuer-stamped `sub`. The credential carries **no** third-party
+/// caveat: `assume-role` is a pure render. Non-attested roles pass `&[]`.
 pub fn mint_credential(
     keyring: &Keyring,
     audience: &str,
@@ -157,36 +168,65 @@ pub fn mint_credential(
     cnf: &str,
     role: &str,
     rev_epoch: u64,
-    attested: Option<AttestedTpc<'_>>,
+    baked_attested: &[(String, String)],
+) -> Macaroon {
+    let mut caveats = vec![
+        Caveat::scalar(name::OP, op::ASSUME_ROLE),
+        Caveat::scalar(name::AUD, audience),
+        Caveat::scalar(name::SUB, sub),
+        Caveat::scalar(name::CNF, cnf),
+        Caveat::scalar(name::ROLE, role),
+        Caveat::scalar(name::EPOCH, rev_epoch.to_string()),
+    ];
+    for (n, v) in baked_attested {
+        caveats.push(Caveat::scalar(n, v));
+    }
+    macaroon::mint(keyring, caveats)
+}
+
+/// Step 1 of exchange for an **attested** role: a short-lived
+/// `op=exchange-finalize` intermediate carrying the same identity/role as
+/// the eventual credential plus an `exp` and the undischarged attested
+/// third-party caveat. The holder discharges the TPC at the attestation
+/// authority and presents the bundle to `POST /v1/exchange-finalize`,
+/// which bakes the attested values into the final credential. A fresh
+/// chain from root (only the root holder can mint), not an attenuation of
+/// the ticket — mirrors [`mint_credential_ticket`] one level deeper.
+#[allow(clippy::too_many_arguments)]
+pub fn mint_intermediate(
+    keyring: &Keyring,
+    audience: &str,
+    sub: &str,
+    cnf: &str,
+    role: &str,
+    rev_epoch: u64,
+    exp_unix: u64,
+    attested: AttestedTpc<'_>,
 ) -> Macaroon {
     let base = macaroon::mint(
         keyring,
         vec![
-            Caveat::scalar(name::OP, op::ASSUME_ROLE),
+            Caveat::scalar(name::OP, op::EXCHANGE_FINALIZE),
             Caveat::scalar(name::AUD, audience),
             Caveat::scalar(name::SUB, sub),
             Caveat::scalar(name::CNF, cnf),
             Caveat::scalar(name::ROLE, role),
             Caveat::scalar(name::EPOCH, rev_epoch.to_string()),
+            Caveat::scalar(name::EXP, exp_unix.to_string()),
         ],
     );
-    match attested {
-        None => base,
-        Some(a) => {
-            // `r` is fresh per caveat, so a discharge binds to this
-            // credential alone; the holder cannot recover it (it has
-            // neither `K_M-B` nor the chain tag at the TPC position).
-            let tpc = crate::tpc::build_caveat_attested(
-                base.tail(),
-                a.k_m_b,
-                sub,
-                a.org_id,
-                a.mode,
-                a.location,
-            );
-            base.attenuate(tpc)
-        }
-    }
+    // `r` is fresh per caveat, so the discharge binds to this intermediate
+    // alone; the holder cannot recover it (it has neither `K_M-B` nor the
+    // chain tag at the TPC position).
+    let tpc = crate::tpc::build_caveat_attested(
+        base.tail(),
+        attested.k_m_b,
+        sub,
+        attested.org_id,
+        attested.mode,
+        attested.location,
+    );
+    base.attenuate(tpc)
 }
 
 /// Fixed `client_id` bound into the admin service token's third-party
@@ -322,7 +362,7 @@ mod tests {
         // The exchange gate: the ticket carries its own TPC.
         assert_eq!(tpc_count(&ticket), 1);
 
-        let cred = mint_credential(&kr, "mint", SUB, &cnf(), "volume-ro", 7, None);
+        let cred = mint_credential(&kr, "mint", SUB, &cnf(), "volume-ro", 7, &[]);
         assert!(cred.verify(&kr));
         let pe = EffectiveCaveats::new(cred.caveats());
         assert_eq!(
@@ -344,32 +384,56 @@ mod tests {
     }
 
     #[test]
-    fn attested_role_credential_carries_a_discharging_tpc() {
+    fn credential_bakes_attested_values_as_caveats() {
+        // The final credential (step 2) carries the attested values as
+        // ordinary MAC'd caveats and **no** third-party caveat — render
+        // resolves them through `{{caveat.X}}`.
+        let kr = ring();
+        let baked = [("project".to_string(), "images".to_string())];
+        let cred = mint_credential(&kr, "mint", SUB, &cnf(), "demo-attested", 7, &baked);
+        assert!(cred.verify(&kr));
+        let pe = EffectiveCaveats::new(cred.caveats());
+        assert_eq!(
+            pe.resolve(name::OP),
+            Resolved::Value(op::ASSUME_ROLE.into())
+        );
+        assert_eq!(pe.resolve("project"), Resolved::Value("images".into()));
+        assert_eq!(tpc_count(&cred), 0);
+    }
+
+    #[test]
+    fn attested_role_intermediate_carries_a_discharging_tpc() {
         const K_M_B: [u8; 32] = [9u8; 32];
         const ATT_LOCATION: &str = "https://coord-b.example/v1/discharge";
         let kr = ring();
-        let cred = mint_credential(
+        let interm = mint_intermediate(
             &kr,
             "mint",
             SUB,
             &cnf(),
             "volume-ro",
             7,
-            Some(AttestedTpc {
+            1_700_000_000,
+            AttestedTpc {
                 k_m_b: &K_M_B,
                 org_id: "org_demo",
                 mode: "volume-ro",
                 location: ATT_LOCATION,
-            }),
+            },
         );
-        assert!(cred.verify(&kr));
-        // Identity caveats are exactly the plain credential's.
-        let pe = EffectiveCaveats::new(cred.caveats());
+        assert!(interm.verify(&kr));
+        // The intermediate's own partition + identity + a short exp.
+        let pe = EffectiveCaveats::new(interm.caveats());
+        assert_eq!(
+            pe.resolve(name::OP),
+            Resolved::Value(op::EXCHANGE_FINALIZE.into())
+        );
         assert_eq!(pe.resolve(name::ROLE), Resolved::Value("volume-ro".into()));
         assert_eq!(pe.resolve(name::SUB), Resolved::Value(SUB.into()));
+        assert_eq!(pe.min_bound(name::EXP), Some(1_700_000_000));
         // Plus exactly one third-party caveat, naming the authority.
-        assert_eq!(tpc_count(&cred), 1);
-        let (location, cid) = cred
+        assert_eq!(tpc_count(&interm), 1);
+        let (location, cid) = interm
             .caveats()
             .iter()
             .find_map(|c| match c {
@@ -389,8 +453,8 @@ mod tests {
     }
 
     #[test]
-    fn attested_tpcs_draw_fresh_r_per_credential() {
-        // Two credentials for the same sub — even the same role — seal
+    fn attested_tpcs_draw_fresh_r_per_intermediate() {
+        // Two intermediates for the same sub — even the same role — seal
         // distinct `r` values, so a discharge minted for one cannot
         // satisfy the other's TPC.
         const K_M_B: [u8; 32] = [9u8; 32];
@@ -402,8 +466,18 @@ mod tests {
             mode: "volume-ro",
             location: ATT_LOCATION,
         };
-        let mint_one =
-            || mint_credential(&kr, "mint", SUB, &cnf(), "volume-ro", 7, Some(attested()));
+        let mint_one = || {
+            mint_intermediate(
+                &kr,
+                "mint",
+                SUB,
+                &cnf(),
+                "volume-ro",
+                7,
+                1_700_000_000,
+                attested(),
+            )
+        };
         let r_of = |cred: &Macaroon| {
             let cid = cred
                 .caveats()
