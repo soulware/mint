@@ -113,11 +113,11 @@ For a more complex example the `demo-attested` template requires an attested rol
 The template for the `demo-attested` role substitutes two `{{caveat.X}}` values:
 
 * `{{caveat.sub}}` - the client identifier (defined at enrollment)
-* `{{caveat.dir}}` - role-specific value (defined at _exchange_ and attested via third-party caveat)
+* `{{caveat.path}}` - role-specific value (defined at _exchange_ and attested via third-party caveat)
 
 ```bash
-# Exchange for the role-specific service token, passing the value to be attested for the {{caveat.dir}} template expression
-./target/debug/mint client exchange demo-attested --attest dir=images
+# Exchange for the role-specific service token, passing the value to be attested for the {{caveat.path}} template expression
+./target/debug/mint client exchange demo-attested --attest path=images
 
 # Assume the role to obtain short-lived Tigris access keys
 ./target/debug/mint client assume-role demo-attested
