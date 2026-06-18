@@ -1,11 +1,10 @@
 # Mint
 
-[tbd]
+Mint lets you create "roles" consisting of flexible IAM policy templates associated with Tigris access keys.
+We use macaroons for authorization, holder-of-key proof-of-possession for authentication, and third-party caveats for attestation.
+Policy templates support expressions resolved from configuration (`{{env.X}}`) and from caveats on the macaroon itself (`{{caveat.X}}`).
 
-Mint extends the simplified [Tigris IAM](https://www.tigrisdata.com/docs/iam/) model, supporting the exchange of long-lived "service tokens" for temporary, limited-privilege (attenuated) credentials based on IAM policy templates. You can think of this as _roughly_ analogous to a lightweight macaroon-aware STS (but don't quote me on that).
-
-* AWS [Identity and Access Management](https://aws.amazon.com/iam/) (IAM)
-* AWS [Security Token Service](https://docs.aws.amazon.com/STS/latest/APIReference/Welcome.html) (STS)
+Mint extends the simplified [Tigris IAM](https://www.tigrisdata.com/docs/iam/) model, with the ability to exchange long-lived "service tokens" for temporary, limited-privilege credentials derived from policy templates. Think of this as _roughly_ analogous to a lightweight macaroon-aware STS (but don't quote me on that).
 
 Example policy template -
 
@@ -31,7 +30,7 @@ The following expressions are replaced when the policy is created from the templ
 * `{{env.prefix}}` - path prefix
 * `{{mint.expiry}}` - policy expiration
 
-Mint additionally supports flexible `{{caveat.<key>}}` expressions fulfilled by the client credential itself. This lets us do interesting things with both *attenuation* and *attestation* -
+Mint additionally supports flexible `{{caveat.X}}` expressions fulfilled by the client credential itself. This lets us do interesting things with both *attenuation* and *attestation* -
 
 * *attenuation* of existing credentials to further restrict a policy
 * *attestation* (by a third-party) of policy template expression values
