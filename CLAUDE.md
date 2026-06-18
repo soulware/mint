@@ -10,7 +10,7 @@ up a role, renders the role's IAM-policy template from the macaroon's caveats, m
 short-lived Tigris keypair, and returns it. **The mint is never in the data path** — it hands
 out credentials, it does not proxy I/O.
 
-It is a prototype tracking the settled design in `docs/design-mint.md` (in the
+It implements the settled design in `docs/design-mint.md` (in the
 [elide repo](https://github.com/soulware/elide), alongside `docs/design-auth-service.md` and
 `docs/design-mint-template-seal.md`). It was extracted from elide and is deliberately free of
 `elide-*` dependencies — a standalone Cargo workspace destined to become its own OSS project.
@@ -193,16 +193,11 @@ The root keyring lives at `<data_dir>/root_keys/` (generated on first start). `K
 (`[auth.demo]` / `[attestation.demo]`). A production instance must have them provisioned out of
 band and **fails closed if absent**. See `open_store` in `main.rs` for the gating.
 
-## Out of scope (prototype)
-TLS, multi-root / root rotation as an operation, multi-tenancy, `ListRoles`/`GetRole`, and
-third-party-caveat discharge for a central identity authority. Backup/replication of `data_dir`
-and root rotation remain open questions.
-
 ## Reference material
 
 Fly.io's macaroon work is the closest public reference implementation and writing — useful
 background for the caveat algebra, third-party-caveat discharge, and the operational concerns
-this prototype shares.
+this project shares.
 
 - [`macaroon-thought.md`](https://github.com/superfly/macaroon/blob/main/macaroon-thought.md) —
   design notes for Fly's `superfly/macaroon` library; the reference implementation to compare

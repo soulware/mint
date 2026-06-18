@@ -88,10 +88,10 @@ max_ttl_seconds = 900
 default_ttl_seconds = 300
 
 # The full manifest of `{{caveat.X}}` the policy template substitutes —
-# whatever the provenance. `project` is attestation-sourced (declared
-# below); `sub` is issuer-stamped. Attested names must be a subset of this.
+# whatever the provenance. `dir` is attestation-sourced (declared below);
+# `sub` is issuer-stamped. Attested names must be a subset of this.
 [role.template]
-caveat = ["project", "sub"]
+caveat = ["dir", "sub"]
 
 # Marks the role attested: its credential carries an attested third-party
 # caveat the authority discharges at `exchange-finalize`, where the
@@ -102,4 +102,4 @@ caveat = ["project", "sub"]
 # role (a discharge is still required, but no value is baked).
 [role.attestation]
 # mode = "demo-attested"
-attested = ["project"]
+attested = ["dir"]

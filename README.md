@@ -1,128 +1,128 @@
-# mint (prototype)
+# Mint
 
-Macaroon-authenticated scoped-credential vending for Tigris. Tracks
-`docs/design-mint.md` in the [elide repo](https://github.com/soulware/elide).
+[tbd]
 
-This is an implementation tracking the settled design — a runnable
-vertical slice, not v1. It was extracted from the elide repo and is
-deliberately free of `elide-*` dependencies.
+Mint extends the simplified [Tigris IAM](https://www.tigrisdata.com/docs/iam/) model, supporting the exchange of long-lived "service tokens" for temporary, limited-privilege (attenuated) credentials based on IAM policy templates. You can think of this as _roughly_ analogous to a lightweight macaroon-aware STS (but don't quote me on that).
 
-## Caveat vocabulary
+* AWS [Identity and Access Management](https://aws.amazon.com/iam/) (IAM)
+* AWS [Security Token Service](https://docs.aws.amazon.com/STS/latest/APIReference/Welcome.html) (STS)
 
-Borrowed verbatim from the RFCs (`docs/design-mint.md` § *Standard
-caveats*): `aud` (RFC 7519), `exp` (RFC 7519), `sub` (RFC 7519 — the
-opaque principal; Elide puts a coordinator ULID here), `cnf` (RFC 7800
-holder-of-key, scalar-encoded `ed25519:<pub>`). Coined, mint-specific:
-`op` (endpoint partition — positively required at every endpoint, never
-absence-tested), `role`, `invite` (the rotation nonce). Elide's only
-namespaced caveat is `elide:Volume`.
+Example policy template -
 
-## Flow
-
-**Enrollment** (`docs/design-mint.md` § *Enrollment*):
-
-```
-mint invite                -> reusable non-expiring invite macaroon
-                              (op=enroll, aud, current invite nonce)
-client attenuates sub+cnf, PoP
-  POST /v1/enroll          -> pending record (keyed by sub) + short
-                              intermediate (op=enroll-exchange)
-operator: mint enroll list / approve <sub>   (verify cnf fingerprint
-                              out of band — the client prints its own)
-  POST /v1/enroll-exchange -> 403 until approved, then re-mint the
-                              non-expiring primary from root
-                              (op=assume-role); pending record consumed
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject"],
+      "Resource": ["arn:aws:s3:::{{env.bucket}}/{{env.prefix}}/*"],
+      "Condition": {
+        "DateLessThan": {"aws:CurrentTime": "{{mint.expiry}}"}
+      }
+    }
+  ]
+}
 ```
 
-**Vending**: the client attenuates the held primary (`exp`,
-`elide:Volume`, …) and `POST /v1/assume-role` + PoP → role gate →
-policy render → Tigris keypair.
+The following expressions are replaced when the policy is created from the template -
 
-`mint invite --rotate` draws a new nonce and cancels in-flight
-enrollments; outstanding primaries are unaffected.
+* `{{env.bucket}}` - bucket name
+* `{{env.prefix}}` - path prefix
+* `{{mint.expiry}}` - policy expiration
 
-## Modules
+Mint additionally supports flexible `{{caveat.<key>}}` expressions fulfilled by the client credential itself. This lets us do interesting things with both *attenuation* and *attestation* -
 
-- `caveat` / `macaroon` — named **scalar** caveats, chained-BLAKE3 MAC,
-  base64 wire. `EffectiveCaveats` resolves a name tri-state — `Absent`
-  / `Value` / `Unsatisfiable` — ≥2 disagreeing occurrences are
-  `Unsatisfiable` (fail closed, the append-a-contradictory-copy
-  defence). `caveat::name` / `caveat::op` are the canonical constants.
-- `pop` — the `cnf` holder-of-key gate. Ed25519 over
-  `tail ‖ BLAKE3(raw-body)`; freshness `ts` rides in the body. Required
-  on all three operations in the Elide path.
-- `issuance` — `mint_invite` / `mint_intermediate` / `mint_primary`
-  (each a fresh chain from root) + `bound_identity`.
-- `state` — persisted invite nonce + transient pending table, a
-  directory of files (`invite`, `clients/pending/<sub>.json`,
-  `clients/enrolled/<sub>`) so the lifecycle is `ls`-inspectable. Idempotent
-  same-`(sub,pub)`, conflict on a different key, GC of stale unapproved,
-  consume-on-exchange.
-- `config` — TOML: audience, `data_dir`, `roles_dir`, tenant, role
-  metadata. The macaroon root key is not config — `state::Store`
-  generates `<data_dir>/root_key` (64 hex, 0600) on first start.
-  Each role's policy template is a separate file
-  under `roles_dir`, `<name>.json` by default (`policy_file` overrides);
-  derived or explicit, it must be a single normal path component.
-  Admin credential from `AWS_*`, never the TOML.
-- `role` / `template` / `audit` / `http` — role gate, handlebars policy
-  render, JSON audit line, axum endpoints.
-- `iam` — `KeypairMinter` trait; `FakeMinter` for tests.
+* *attenuation* of existing credentials to further restrict a policy
+* *attestation* (by a third-party) of values within a policy, settled point-in-time at exchange
 
-## Build
+## Getting Started
 
-mint is a standalone Cargo workspace:
+Initial configuration and Tigris admin credential management -
+```bash
+cp examples/mint-demo.toml ./mint-demo.toml   # then edit bucket name (note: store.bucket and env.bucket)
+export MINT_CONFIG=./mint-demo.toml
 
-```sh
-cargo build && cargo test
+# Then either (A) or (B) below -
+
+# (A) Tigris admin credentials in 1Password
+cp examples/mint-demo.env ./mint-demo.env    # then edit to match your vault and path
+
+# (B) Tigris admin credentials directly exported
+export AWS_ACCESS_KEY_ID=<KEY_ID>
+export AWS_SECRET_ACCESS_KEY=<SECRET_KEY>
 ```
 
-## Run it
+Run the `mint` server -
 
-clap CLI (`--config` defaults to `mint.toml`). Server + operator:
+```bash
+# Build it first
+cargo build
 
-```sh
-mint serve   --config mint-demo.toml                 # Tigris-backed; AWS_* admin creds in the environment
-mint login   --config mint-demo.toml                 # operator session at the (demo) auth role
-mint seal    --config mint-demo.toml                 # author + publish the template seal; serve is dormant until sealed
-mint invite  --config mint-demo.toml                 # print the invite macaroon
-mint enroll list    --config mint-demo.toml
-mint enroll approve --config mint-demo.toml <sub>    # shows the fingerprint, interactive y/N; --yes for automation
+# Then run it via 1Password "op run" -
+op run --env-file ./mint-demo.env -- ./target/debug/mint serve
+
+# Or with admin credentials exported as env vars, simply -
+./target/debug/mint serve
 ```
 
-`mint serve` reads its `AWS_*` admin credential from the environment (never the TOML). To source it
-from 1Password, wrap `serve` in `op run` with the committed example env file — which holds `op://…`
-*references*, not secrets:
+With `mint serve` still running we can then interact with it via the mint cli in a new terminal. Note that the mint server by default runs in "demo mode" with a demo authentication service available via `auth.sock` locally.
 
-```sh
-cp examples/mint-demo.env ./mint-demo.env            # gitignored; edit refs for your vault
-op run --env-file ./mint-demo.env -- mint serve --config mint-demo.toml
+```bash
+export MINT_CONFIG=./mint-demo.toml
+
+# Login via mint cli
+./target/debug/mint login
+
+# "Seal" the example policy templates
+./target/debug/mint seal
+
+# Display the <INVITE> for enrolling a new client
+./target/debug/mint invite
 ```
 
-Client (the coordinator's half; identity under `./mint_client`):
+The mint cli includes a demonstration `client` sub-cmd to allow the enrollment flow to be exercised.
 
-```sh
-mint client fingerprint                                  # mints the identity on first use; operator compares this during `enroll approve`
-mint client enroll      --id <sub> <macaroon|file|->     # invite is the final positional arg
-mint client exchange                                     # exit 2 until approved, then saves the primary
-mint client assume-role [--req '{...}'] [--caveat N=V] <role>
-                                                         # body fields beyond ts/role/ttl are opaque to mint
+```bash
+# Client begins the enrollment process, providing the <INVITE> from earlier -
+./target/debug/mint client enroll demo_client <INVITE>
+
+# The operator can then approve the enrollment request -
+./target/debug/mint enroll list
+./target/debug/mint enroll approve demo_client
+
+# The client fingerprint can be verified out-of-band -
+./target/debug/mint client fingerprint
 ```
 
-`serve` always runs against real Tigris IAM (or any S3-compatible
-backend speaking the IAM API). The hermetic shape is the `mint-e2e`
-harness bin — the same serve loop over the deterministic fake minter
-and a local-filesystem store — built with
-`cargo build --features e2e-harness --bin mint-e2e` and spawned by
-cross-workspace end-to-end tests.
+Once a client has successfully enrolled with mint it can exchange its credentials for per-role long-lived "service tokens". The client can then "assume-role" swapping a service token for short-lived Tigris/S3 credentials associated with an IAM policy built from the template.
 
-## Out of scope
+```bash
+# List the available roles (these are what we "sealed" earlier) -
+./target/debug/mint role list
 
-TLS, multi-root / root rotation, multi-tenancy, `ListRoles`/`GetRole`,
-third-party-caveat discharge for a central identity authority
-(`docs/design-mint.md` § *Open questions* #14/#15). The root key is
-generated at `<data_dir>/root_key` on first start; backup/replication
-of `data_dir` and root rotation remain open (OQ#14, tied to #3).
+# Exchange for a long-lived service token for the "demo" role -
+./target/debug/mint client exchange demo
+
+# Assume this demo role to obtain short-lived Tigris access keys -
+./target/debug/mint client assume-role demo
+```
+
+For a slightly more complex example the `demo-attested` role requires an *attestation* — supplied **at exchange time**. By default mint runs in "demo mode" with a demo attestation service available via `attest.sock` locally.
+
+The template for the `demo-attested` role substitutes two `{{caveat.X}}` values:
+
+* `{{caveat.sub}}` - the client identifier (issuer-stamped at enrollment)
+* `{{caveat.dir}}` - role-specific value (attested via third-party, stamped at exchange)
+
+```bash
+# Exchange for the role-specific service token
+# passing the attested value for {{caveat.dir}} template expression
+./target/debug/mint client exchange demo-attested --attest dir=images
+
+# Assume the role to obtain short-lived Tigris access keys
+./target/debug/mint client assume-role demo-attested
+```
 
 ## License
 
