@@ -27,7 +27,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use chrono::Utc;
+use chrono::{Timelike, Utc};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -639,7 +639,12 @@ async fn assume_role(State(state): State<AppState>, headers: HeaderMap, body: By
         }
     }
 
-    let expiry = now + chrono::Duration::seconds(granted.ttl_seconds as i64);
+    // Floor to whole seconds so the rendered `DateLessThan` carries no
+    // sub-second component. `DateLessThan` is an upper bound, so truncating
+    // keeps the credential within its granted TTL.
+    let expiry = (now + chrono::Duration::seconds(granted.ttl_seconds as i64))
+        .with_nanosecond(0)
+        .expect("0 is a valid nanosecond");
     let expiry_iso = expiry.to_rfc3339();
     let policy = match render_policy(
         policy_template,

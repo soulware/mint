@@ -214,6 +214,18 @@ async fn happy_path_mints_scoped_keypair() {
         calls[0].policy_json
     );
 
+    // The rendered `DateLessThan` expiry is floored to whole seconds.
+    let current_time = calls[0]
+        .policy_json
+        .split("aws:CurrentTime")
+        .nth(1)
+        .and_then(|tail| tail.split('"').nth(2))
+        .expect("policy carries an aws:CurrentTime value");
+    assert!(
+        !current_time.contains('.'),
+        "expiry should be floored to whole seconds: {current_time}"
+    );
+
     let audit = String::from_utf8(audit_buf.lock().unwrap().clone()).unwrap();
     assert!(audit.contains("\"outcome\":\"granted\""), "audit: {audit}");
 }
