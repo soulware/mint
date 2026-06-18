@@ -6,9 +6,6 @@ Policy templates support expressions resolved from configuration (`{{env.X}}`) a
 
 Mint extends the simplified [Tigris IAM](https://www.tigrisdata.com/docs/iam/) model, with the ability to exchange long-lived "service tokens" for temporary, limited-privilege credentials derived from policy templates. Think of this as _roughly_ analogous to a lightweight macaroon-aware STS (but don't quote me on that).
 
-* AWS [Identity and Access Management](https://aws.amazon.com/iam/) (IAM)
-* AWS [Security Token Service](https://docs.aws.amazon.com/STS/latest/APIReference/Welcome.html) (STS)
-
 Example policy template -
 
 ```json
