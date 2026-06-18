@@ -220,7 +220,7 @@ async fn full_flow_over_unix_socket() {
     // assume-role returns the (fake) keypair JSON — the full chain verified
     // and a scoped credential minted over the sockets. The credential is a
     // bare primary (attestation was baked in at exchange), so no discharge.
-    let kp = mint::client::assume_role(cdir.path(), &url, role, None, &[], 900, &cred)
+    let kp = mint::client::assume_role(cdir.path(), &url, role, &[], 900, &cred)
         .await
         .expect("assume-role over uds");
     let v: serde_json::Value = serde_json::from_str(&kp).expect("keypair json");

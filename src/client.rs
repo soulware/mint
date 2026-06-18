@@ -57,7 +57,7 @@ pub enum ClientError {
     BadFile(&'static str),
     #[error("{path} not found — {hint}")]
     Missing { path: String, hint: &'static str },
-    #[error("--req must be a JSON object ({0})")]
+    #[error("bad request ({0})")]
     BadRequest(&'static str),
     #[error("--caveat must be NAME=VALUE (got {0:?})")]
     BadCaveat(String),
@@ -470,30 +470,16 @@ fn parse_caveats(args: &[String]) -> Result<Vec<(String, String)>, ClientError> 
         .collect()
 }
 
-/// Merge the inline `--req` JSON under the client-owned
-/// `ts`/`role`/`ttl_seconds` (those are the conventional fields the
-/// client sets and signs; a value supplied for them in `--req` is
-/// overwritten, not trusted). Pure + ts-injected for testability. mint
-/// no longer substitutes from the body (scoping is attested by a
-/// discharge), so any other field is opaque, PoP-covered, and unread.
-fn build_request_body(
-    request_src: Option<&str>,
-    role: &str,
-    ttl_seconds: u64,
-    ts: u64,
-) -> Result<String, ClientError> {
-    let mut obj = match request_src {
-        None => serde_json::Map::new(),
-        Some(src) => match serde_json::from_str::<serde_json::Value>(src) {
-            Ok(serde_json::Value::Object(m)) => m,
-            Ok(_) => return Err(ClientError::BadRequest("not an object")),
-            Err(_) => return Err(ClientError::BadRequest("invalid JSON")),
-        },
-    };
+/// The assume-role request body: just the client-owned `ts`/`role`/
+/// `ttl_seconds`. These are the only fields mint reads (scoping is
+/// attested by a discharge, not the body), so there is nothing else to
+/// send. Pure + ts-injected for testability.
+fn build_request_body(role: &str, ttl_seconds: u64, ts: u64) -> String {
+    let mut obj = serde_json::Map::new();
     obj.insert("ts".into(), ts.into());
     obj.insert("role".into(), role.into());
     obj.insert("ttl_seconds".into(), ttl_seconds.into());
-    Ok(serde_json::Value::Object(obj).to_string())
+    serde_json::Value::Object(obj).to_string()
 }
 
 /// `mint client assume-role`: attenuate the held credential (the
@@ -505,7 +491,6 @@ pub async fn assume_role(
     dir: &Path,
     base_url: &str,
     role: &str,
-    request_src: Option<&str>,
     caveats: &[String],
     ttl_seconds: u64,
     in_file: &str,
@@ -543,7 +528,7 @@ pub async fn assume_role(
     // discharged and baked in at exchange — so `assume-role` presents a
     // bare primary with no discharge.
     eprintln!("  → POST {base_url}/v1/assume-role");
-    let body = build_request_body(request_src, role, ttl_seconds, now_unix())?;
+    let body = build_request_body(role, ttl_seconds, now_unix());
     let (status, text) = post_bundle(base_url, "/v1/assume-role", &mac, &[], &sk, body).await?;
     if status != 200 {
         return Err(ClientError::Server { status, body: text });
@@ -818,38 +803,19 @@ mod tests {
     }
 
     #[test]
-    fn request_body_is_opaque_passthrough_with_client_owned_fields() {
-        // No --req: just the client-owned conventional fields.
-        let b = build_request_body(None, "read", 900, 1000).unwrap();
+    fn request_body_carries_only_client_owned_fields() {
+        // The body is exactly the client-owned conventional fields — mint
+        // reads nothing else, so the client sends nothing else.
+        let b = build_request_body("read", 900, 1000);
         let v: serde_json::Value = serde_json::from_str(&b).unwrap();
         assert_eq!(v["ts"], 1000);
         assert_eq!(v["role"], "read");
         assert_eq!(v["ttl_seconds"], 900);
-
-        // Arbitrary fields (incl. an array) pass through verbatim;
-        // client-owned keys win over anything the caller put there.
-        let b = build_request_body(
-            Some(r#"{"prefix":"demo/x","ancestors":["a","b"],"role":"EVIL","ts":1}"#),
-            "read",
-            900,
-            1000,
-        )
-        .unwrap();
-        let v: serde_json::Value = serde_json::from_str(&b).unwrap();
-        assert_eq!(v["prefix"], "demo/x");
-        assert_eq!(v["ancestors"], serde_json::json!(["a", "b"]));
-        assert_eq!(v["role"], "read", "client-owned, not caller's EVIL");
-        assert_eq!(v["ts"], 1000, "client-owned, not caller's 1");
-
-        // Non-object / invalid JSON fails closed.
-        assert!(matches!(
-            build_request_body(Some("[1,2]"), "r", 1, 1),
-            Err(ClientError::BadRequest(_))
-        ));
-        assert!(matches!(
-            build_request_body(Some("{not json"), "r", 1, 1),
-            Err(ClientError::BadRequest(_))
-        ));
+        assert_eq!(
+            v.as_object().unwrap().len(),
+            3,
+            "only ts/role/ttl_seconds are sent"
+        );
     }
 
     #[test]
