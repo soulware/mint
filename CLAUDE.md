@@ -193,11 +193,6 @@ The root keyring lives at `<data_dir>/root_keys/` (generated on first start). `K
 (`[auth.demo]` / `[attestation.demo]`). A production instance must have them provisioned out of
 band and **fails closed if absent**. See `open_store` in `main.rs` for the gating.
 
-## Out of scope (prototype)
-TLS, multi-root / root rotation as an operation, multi-tenancy, `ListRoles`/`GetRole`, and
-third-party-caveat discharge for a central identity authority. Backup/replication of `data_dir`
-and root rotation remain open questions.
-
 ## Reference material
 
 Fly.io's macaroon work is the closest public reference implementation and writing — useful
