@@ -1,9 +1,8 @@
 # Mint
 
-Mint lets you create "roles" consisting of flexible IAM policy templates associated with Tigris access keys. 
+Mint lets you create "roles" consisting of flexible IAM policy templates associated with Tigris access keys.
 We use macaroons for authorization, holder-of-key proof-of-possession for authentication, and third-party caveats for attestation.
-Policy templates support expressions (`{{env.bucket}}`) replaced with values sourced from configuration.
-Templates also support expressions (`{{caveat.path}}`) replaced directly from caveats on the macaroon itself.
+Policy templates support expressions resolved from configuration (`{{env.X}}`) and from caveats on the macaroon itself (`{{caveat.X}}`).
 
 Mint extends the simplified [Tigris IAM](https://www.tigrisdata.com/docs/iam/) model, with the ability to exchange long-lived "service tokens" for temporary, limited-privilege credentials derived from policy templates. Think of this as _roughly_ analogous to a lightweight macaroon-aware STS (but don't quote me on that).
 
