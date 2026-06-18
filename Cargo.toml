@@ -10,6 +10,10 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Macaroon-authenticated scoped-credential vending for Tigris (prototype)."
+# `mint-e2e` is a feature-gated test harness, not a user-facing binary. Pinning
+# the default run target keeps bare `cargo run` resolving to `mint` so the
+# harness never surfaces as an ambiguous-binary option.
+default-run = "mint"
 
 [features]
 # Builds the `mint-e2e` bin: the hermetic daemon harness (FakeMinter +
