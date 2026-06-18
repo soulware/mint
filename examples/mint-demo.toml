@@ -1,14 +1,15 @@
 # Minimal demo config (docs/design-mint.md § "Reference client & demo").
 #
-# Two roles, together exercising every template namespace. `demo` is a
-# plain key-bound role over a single server-side {{env.prefix}} ({{env.X}}
-# + {{mint.expiry}} only, no contract, no TPC). `demo-attested` adds the
-# caveat and attestation namespaces: its policy substitutes {{caveat.sub}}
-# (MAC-verified) and {{attested.project}}, and its credential carries an
-# attested third-party caveat, so assume-role is refused until the client
-# fetches a discharge from the demo attestation authority. This is NOT the
-# Elide role inventory (see mint-elide.toml for that).
-# Each role's policy template lives under roles_dir (examples/demo_roles/).
+# Two roles, together exercising the env, mint, and caveat namespaces.
+# `demo` is a plain key-bound role over a single server-side {{env.prefix}}
+# ({{env.X}} + {{mint.expiry}} only, no contract, no TPC). `demo-attested`
+# adds the caveat namespace: its policy substitutes {{caveat.sub}}
+# (MAC-verified) and {{caveat.path}} (attestation-sourced), and its
+# credential carries an attested third-party caveat, so assume-role is
+# refused until the client fetches a discharge from the demo attestation
+# authority.
+#
+# The per-role policy templates live under roles_dir (examples/demo_roles/).
 #
 # `mint serve` always talks to a real S3-compatible backend (Tigris,
 # MinIO, AWS). Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY in the
@@ -68,7 +69,7 @@ bucket = "mint-demo"
 # being restated here.
 [env]
 bucket = "mint-demo"
-prefix = "demo"
+prefix = "images"
 
 # Every template value is MAC-verified or server-side — there is no
 # self-asserted request scoping. `demo` references only `{{env.X}}` and
@@ -88,10 +89,10 @@ max_ttl_seconds = 900
 default_ttl_seconds = 300
 
 # The full manifest of `{{caveat.X}}` the policy template substitutes —
-# whatever the provenance. `dir` is attestation-sourced (declared below);
+# whatever the provenance. `path` is attestation-sourced (declared below);
 # `sub` is issuer-stamped. Attested names must be a subset of this.
 [role.template]
-caveat = ["dir", "sub"]
+caveat = ["path", "sub"]
 
 # Marks the role attested: its credential carries an attested third-party
 # caveat the authority discharges at `exchange-finalize`, where the
@@ -102,4 +103,4 @@ caveat = ["dir", "sub"]
 # role (a discharge is still required, but no value is baked).
 [role.attestation]
 # mode = "demo-attested"
-attested = ["dir"]
+attested = ["path"]
