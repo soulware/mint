@@ -30,7 +30,7 @@ The following expressions are replaced when the policy is created from the templ
 * `{{env.prefix}}` - path prefix
 * `{{mint.expiry}}` - policy expiration
 
-Mint additionally supports flexible `{{caveat.<key>}}` expressions fulfilled by the client credential itself. This lets us do interesting things with both *attenuation* and *attestation* -
+Mint additionally supports flexible `{{caveat.X}}` expressions fulfilled by the client credential itself. This lets us do interesting things with both *attenuation* and *attestation* -
 
 * *attenuation* of existing credentials to further restrict a policy
 * *attestation* (by a third-party) of policy template expression values
