@@ -158,12 +158,6 @@ enum ClientCmd {
         /// Defaults to `credentials/<role>`.
         #[arg(long = "in")]
         in_file: Option<String>,
-        /// PoP-signed request body as an inline JSON object. `ts`/`role`/
-        /// `ttl_seconds` are client-owned; any other field is opaque and
-        /// PoP-covered but not read by mint (scoping is attested by a
-        /// discharge, not the body).
-        #[arg(long, value_name = "JSON")]
-        req: Option<String>,
         /// Narrowing caveat to attenuate the credential with (repeatable).
         /// Vocabulary-agnostic — e.g. `--caveat exp=1750000000`.
         #[arg(long = "caveat", value_name = "NAME=VALUE")]
@@ -320,23 +314,14 @@ async fn client_cmd(
         ClientCmd::AssumeRole {
             socket,
             in_file,
-            req,
             caveat,
             ttl,
             role,
         } => {
             let transport = client_transport(socket)?;
             let in_file = in_file.unwrap_or_else(|| mint::client::credential_path(&role));
-            let kp = mint::client::assume_role(
-                &dir,
-                &transport,
-                &role,
-                req.as_deref(),
-                &caveat,
-                ttl,
-                &in_file,
-            )
-            .await?;
+            let kp =
+                mint::client::assume_role(&dir, &transport, &role, &caveat, ttl, &in_file).await?;
             println!("{kp}");
             Ok(())
         }
