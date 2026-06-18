@@ -2,13 +2,12 @@
 
 [tbd]
 
-Mint extends the simplified [Tigris IAM](https://www.tigrisdata.com/docs/iam/) model, supporting the exchange of long-lived "service tokens" for temporary, limited-privilege (attenuated) credentials based on IAM policy templates. You can think of this as _roughly_ analogous to something sort-of-like STS.
+Mint extends the simplified [Tigris IAM](https://www.tigrisdata.com/docs/iam/) model, supporting the exchange of long-lived "service tokens" for temporary, limited-privilege (attenuated) credentials based on IAM policy templates. You can think of this as _roughly_ analogous to a lightweight macaroon-aware STS (but don't quote me on that).
 
 * AWS [Identity and Access Management](https://aws.amazon.com/iam/) (IAM)
-* AWS [Security Token Service](https://docs.aws.amazon.com/STS/latest/APIReference/Welcome.html) (STS) 
+* AWS [Security Token Service](https://docs.aws.amazon.com/STS/latest/APIReference/Welcome.html) (STS)
 
-
-Example policy template - 
+Example policy template -
 
 ```json
 {
@@ -32,21 +31,24 @@ The following expressions are replaced when the policy is created from the templ
 * `{{env.prefix}}` - path prefix
 * `{{mint.expiry}}` - policy expiration
 
-Beyond simple `{{env.<key>}}` expressions, mint supports flexible macaroon-bound `{{caveat.<key>}}` expressions — values carried (and MAC-verified) on the credential itself. Some of these are *attestation-sourced*: vouched by an attestation authority and baked into the credential when the role is exchanged (described later).
+Mint additionally supports flexible `{{caveat.<key>}}` expressions fulfilled by the client credential itself. This lets us do interesting things with both *attenuation* and *attestation* -
+
+* *attenuation* of existing credentials to further restrict a policy
+* *attestation* (by a third-party) of values within a policy, settled point-in-time at exchange
 
 ## Getting Started
 
-Initial configuration and Tigris admin credential management - 
+Initial configuration and Tigris admin credential management -
 ```bash
-cp examples/mint-demo.toml ./mint-demo.toml   # then edit bucket name (x2)
+cp examples/mint-demo.toml ./mint-demo.toml   # then edit bucket name (note: store.bucket and env.bucket)
 export MINT_CONFIG=./mint-demo.toml
 
-# Then either (A) or (B) below - 
+# Then either (A) or (B) below -
 
 # (A) Tigris admin credentials in 1Password
 cp examples/mint-demo.env ./mint-demo.env    # then edit to match your vault and path
 
-# (B) Tigris admin credentials directly exported 
+# (B) Tigris admin credentials directly exported
 export AWS_ACCESS_KEY_ID=<KEY_ID>
 export AWS_SECRET_ACCESS_KEY=<SECRET_KEY>
 ```
@@ -60,7 +62,7 @@ cargo build
 # Then run it via 1Password "op run" -
 op run --env-file ./mint-demo.env -- ./target/debug/mint serve
 
-# Or with admin credentials exported as env vars, simply - 
+# Or with admin credentials exported as env vars, simply -
 ./target/debug/mint serve
 ```
 
@@ -85,11 +87,11 @@ The mint cli includes a demonstration `client` sub-cmd to allow the enrollment f
 # Client begins the enrollment process, providing the <INVITE> from earlier -
 ./target/debug/mint client enroll demo_client <INVITE>
 
-# The operator can then approve the enrollment request - 
+# The operator can then approve the enrollment request -
 ./target/debug/mint enroll list
 ./target/debug/mint enroll approve demo_client
 
-# The client fingerprint can be verified out-of-band - 
+# The client fingerprint can be verified out-of-band -
 ./target/debug/mint client fingerprint
 ```
 
@@ -102,7 +104,7 @@ Once a client has successfully enrolled with mint it can exchange its credential
 # Exchange for a long-lived service token for the "demo" role -
 ./target/debug/mint client exchange demo
 
-# Assume this demo role to obtain short-lived Tigris access keys - 
+# Assume this demo role to obtain short-lived Tigris access keys -
 ./target/debug/mint client assume-role demo
 ```
 
@@ -111,22 +113,16 @@ For a slightly more complex example the `demo-attested` role requires an *attest
 The template for the `demo-attested` role substitutes two `{{caveat.X}}` values:
 
 * `{{caveat.sub}}` - the client identifier (issuer-stamped at enrollment)
-* `{{caveat.dir}}` - a client-specific directory path, **attestation-sourced**: its value is vouched by the attestation authority and baked into the service token when the role is exchanged
-
-Attestation is point-in-time: the value is settled once, at exchange, so `assume-role` is then a plain credential exercise.
+* `{{caveat.dir}}` - role-specific value (attested via third-party, stamped at exchange)
 
 ```bash
-# Exchange for the "demo-attested" service token, supplying the attested
-# value. Under the hood this is a two-step exchange: mint hands back an
-# intermediate, the client fetches a discharge from the attestation
-# authority, and mint bakes `dir` into the final service token.
+# Exchange for the role-specific service token
+# passing the attested value for {{caveat.dir}} template expression
 ./target/debug/mint client exchange demo-attested --attest dir=images
 
-# Assume the role to obtain short-lived Tigris access keys; the baked
-# `dir` renders as {{caveat.dir}} in the resulting policy.
+# Assume the role to obtain short-lived Tigris access keys
 ./target/debug/mint client assume-role demo-attested
 ```
-
 
 ## License
 
