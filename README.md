@@ -1,7 +1,7 @@
 # Mint
 
 Mint lets you create "roles" consisting of flexible IAM policy templates associated with Tigris access keys. 
-We use macaroons to handle both authorization and authentication (via third-party caveats).
+We use macaroons for authorization, holder-of-key proof-of-possession for authentication, and third-party caveats for attestation.
 Policy templates support expressions (`{{env.bucket}}`) replaced with values sourced from configuration.
 Templates also support expressions (`{{caveat.path}}`) replaced directly from caveats on the macaroon itself.
 
