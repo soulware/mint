@@ -27,6 +27,8 @@ pub enum ConfigError {
     DuplicateRole(String),
     #[error("role {role}: {field} must be > 0 and min <= default <= max")]
     BadTtlBounds { role: String, field: String },
+    #[error("ticket_ttl_secs must be > 0")]
+    BadTicketTtl,
     #[error(
         "role {role}: policy_file {value:?} must be a single filename \
          (no path separators, no '.' or '..', not absolute)"
@@ -159,6 +161,13 @@ pub struct RawConfig {
     /// value selects UDS at the default `<data_dir>/mint.sock`.
     #[serde(default)]
     pub socket: Option<String>,
+    /// Lifetime in seconds of the credential ticket minted at
+    /// `/v1/enroll` — the multi-use `op=enroll-exchange` token a client
+    /// presents at `/v1/enroll-exchange`. Defaults to
+    /// [`DEFAULT_TICKET_TTL_SECS`] when omitted; must be
+    /// `> 0`.
+    #[serde(default)]
+    pub ticket_ttl_secs: Option<u64>,
     pub store: Store,
     /// Flat table of operator-defined scalar values surfaced to role
     /// policy templates as `{{env.X}}` (`docs/design-mint.md` §
@@ -452,6 +461,17 @@ pub const DEFAULT_SOCKET_NAME: &str = "mint.sock";
 /// Persisted-state directory when the config omits `data_dir`.
 pub const DEFAULT_DATA_DIR: &str = "mint_data";
 
+/// Credential-ticket lifetime when the config omits
+/// `ticket_ttl_secs`. The ticket is multi-use within this
+/// window: one operator approval, then the client exchanges it once per
+/// role it needs (`docs/design-mint.md` § *Enrollment*). 24 h gives a
+/// client comfortable room to enrol, wait for an out-of-band approval,
+/// and mint its per-role credentials across a working day. If it lapses
+/// the client just re-enrols (idempotent for the same `(sub, pub)` →
+/// fresh ticket); a *new* role after expiry needs a fresh approval, by
+/// design.
+pub const DEFAULT_TICKET_TTL_SECS: u64 = 24 * 60 * 60;
+
 /// The default UDS path `mint serve` binds and `mint client` dials when
 /// no config selects another: `<DEFAULT_DATA_DIR>/<DEFAULT_SOCKET_NAME>`.
 pub fn default_mint_socket() -> PathBuf {
@@ -494,6 +514,11 @@ pub struct Config {
     /// `mint_roles`. Retained for diagnostics; policies are already
     /// resolved into [`Role::policy`].
     pub roles_dir: PathBuf,
+    /// Lifetime in seconds of the credential ticket minted at
+    /// `/v1/enroll`. Resolved from `ticket_ttl_secs`,
+    /// defaulting to [`DEFAULT_TICKET_TTL_SECS`]; validated
+    /// `> 0` at load.
+    pub ticket_ttl_secs: u64,
     /// The resolved listener transport. The CLI may still override this
     /// with an explicit `--bind` (the TCP single-host override).
     pub listener: Listener,
@@ -583,6 +608,11 @@ impl Config {
             .roles_dir
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("mint_roles"));
+        let ticket_ttl_secs = match raw.ticket_ttl_secs {
+            Some(0) => return Err(ConfigError::BadTicketTtl),
+            Some(ttl) => ttl,
+            None => DEFAULT_TICKET_TTL_SECS,
+        };
         // Flatten the two planes into their resolved scalar location +
         // demo-colocation parts; everything downstream consumes those.
         let (auth_location, demo_auth_raw) = match raw.auth {
@@ -707,6 +737,7 @@ impl Config {
             audience: raw.audience,
             data_dir,
             roles_dir,
+            ticket_ttl_secs,
             listener,
             store: raw.store,
             env,
@@ -1270,6 +1301,34 @@ attested = [{attested}]
         assert!(matches!(
             err,
             Err(ConfigError::NonScalarEnv { key }) if key == "bucket"
+        ));
+    }
+
+    #[test]
+    fn ticket_ttl_defaults_when_omitted() {
+        let c = parse_for_test(SAMPLE, &[("volume-ro.json", "{}")]).expect("parse");
+        assert_eq!(c.ticket_ttl_secs, DEFAULT_TICKET_TTL_SECS);
+    }
+
+    #[test]
+    fn ticket_ttl_is_overridable() {
+        let toml = SAMPLE.replace(
+            "audience = \"mint\"",
+            "audience = \"mint\"\nticket_ttl_secs = 1800",
+        );
+        let c = parse_for_test(&toml, &[("volume-ro.json", "{}")]).expect("parse");
+        assert_eq!(c.ticket_ttl_secs, 1800);
+    }
+
+    #[test]
+    fn rejects_zero_ticket_ttl() {
+        let toml = SAMPLE.replace(
+            "audience = \"mint\"",
+            "audience = \"mint\"\nticket_ttl_secs = 0",
+        );
+        assert!(matches!(
+            parse_for_test(&toml, &[("volume-ro.json", "{}")]),
+            Err(ConfigError::BadTicketTtl)
         ));
     }
 

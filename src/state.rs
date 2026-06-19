@@ -12,7 +12,7 @@
 //! ```text
 //! _mint/invite                       current random nonce (one object)
 //! _mint/clients/pending/<sub>.json   transient (sub, pub, invite, first_seen, peer_ip);
-//!                                    GC'd at ticket-exp, deleted at approve()
+//!                                    deleted at approve(); overwritten by re-enroll
 //! _mint/clients/enrolled/<sub>       long-lived {pub, approved_by, approved_at,
 //!                                    fingerprint_shown, kid, rev_epoch, mac}; powers
 //!                                    the re-enrollment fast path
@@ -200,6 +200,12 @@ pub struct RevokeOutcome {
     /// enrolled — the tombstone is still written/kept either way, so
     /// revocation is fail-safe and idempotent.
     pub was_enrolled: bool,
+    /// True if an in-flight pending record was present and deleted. A
+    /// `sub` can be both enrolled and pending at once (a re-enroll after
+    /// approval), so this is independent of `was_enrolled`; revoke clears
+    /// both, giving the operator one verb to reject an abandoned
+    /// enrollment.
+    pub removed_pending: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -994,8 +1000,10 @@ impl Store {
     }
 
     /// Revoke a coordinator: write a tombstone at the high-water
-    /// `rev_epoch` and delete its enrolled record
-    /// (`docs/design-mint.md` § *Revocation*). After this every held
+    /// `rev_epoch`, delete its enrolled record, and drop any in-flight
+    /// pending record (`docs/design-mint.md` § *Revocation*). Clearing
+    /// the pending record gives the operator one verb to reject an
+    /// abandoned enrollment. After this every held
     /// credential fails `assume-role` (its enrolled record is gone), a
     /// held ticket fails `/v1/enroll-exchange` the same way, and the
     /// re-enrollment fast path falls back to the operator-gated slow
@@ -1057,9 +1065,15 @@ impl Store {
             Ok(()) | Err(OsError::NotFound { .. }) => {}
             Err(e) => return Err(e.into()),
         }
+        let removed_pending = match self.objects.delete(&Self::pending_key(sub)).await {
+            Ok(()) => true,
+            Err(OsError::NotFound { .. }) => false,
+            Err(e) => return Err(e.into()),
+        };
         Ok(RevokeOutcome {
             rev_epoch,
             was_enrolled,
+            removed_pending,
         })
     }
 
@@ -1496,22 +1510,6 @@ impl Store {
             report.rekeyed += 1;
         }
         Ok(report)
-    }
-
-    /// Drop pending records older than `max_age_seconds`. The bound is
-    /// ≥ the credential ticket `exp`; once it passes, an unexchanged
-    /// pending is dead weight. The enrolled registry is **not** GC'd.
-    pub async fn gc(&self, now_unix: u64, max_age_seconds: u64) -> Result<usize, StateError> {
-        let mut dropped = 0;
-        for sub in self.pending_subs().await? {
-            if let Ok(Some(p)) = self.get_pending(&sub).await
-                && now_unix.saturating_sub(p.first_seen) > max_age_seconds
-            {
-                let _ = self.objects.delete(&Self::pending_key(&sub)).await;
-                dropped += 1;
-            }
-        }
-        Ok(dropped)
     }
 
     /// Read the bucket-canonical template seal, if any. Returns
@@ -2022,32 +2020,6 @@ mod tests {
             .await
             .unwrap();
         assert!(s.get_enrolled("01ARZ").await.unwrap().is_some());
-    }
-
-    #[tokio::test]
-    async fn gc_drops_old_pending_only_never_enrolled() {
-        let (_d, s) = store().await;
-        let b = s.current_invite().await.unwrap();
-        s.record_pending("old-pending", PUBA, &b, "usr_op", "ip", 0)
-            .await
-            .unwrap();
-        s.record_pending("kept-approved", PUBB, &b, "usr_op", "ip", 0)
-            .await
-            .unwrap();
-        s.approve("kept-approved", PUBB, "usr_op", APPROVED_AT)
-            .await
-            .unwrap();
-        s.record_pending("fresh", PUBA, &b, "usr_op", "ip", 950)
-            .await
-            .unwrap();
-        let dropped = s.gc(1_000, 100).await.unwrap();
-        assert_eq!(dropped, 1, "only the stale pending goes");
-        assert!(s.get_pending("old-pending").await.unwrap().is_none());
-        assert!(
-            s.get_enrolled("kept-approved").await.unwrap().is_some(),
-            "gc never touches the enrolled registry"
-        );
-        assert!(s.get_pending("fresh").await.unwrap().is_some());
     }
 
     #[tokio::test]
@@ -2600,6 +2572,61 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(s.get_enrolled("ghost").await.unwrap().unwrap().rev_epoch, 1);
+    }
+
+    #[tokio::test]
+    async fn revoke_drops_an_in_flight_pending_record() {
+        let (_d, s) = store().await;
+        let b = s.current_invite().await.unwrap();
+        // A coordinator that enrolled but was never approved.
+        s.record_pending("01ARZ", PUBA, &b, "usr_op", "ip", 0)
+            .await
+            .unwrap();
+        let out = s.revoke("01ARZ", "usr_rev", APPROVED_AT).await.unwrap();
+        assert!(!out.was_enrolled, "never enrolled");
+        assert!(out.removed_pending, "the pending record was cleared");
+        assert!(
+            s.get_pending("01ARZ").await.unwrap().is_none(),
+            "pending record deleted"
+        );
+        assert!(
+            s.get_revoked("01ARZ").await.unwrap().is_some(),
+            "tombstone still written"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_clears_both_enrolled_and_a_re_enroll_pending() {
+        let (_d, s) = store().await;
+        let b = s.current_invite().await.unwrap();
+        // Enrolled under PUBA, then a re-enroll under a *different* key
+        // (PUBB) takes the slow path and leaves a fresh pending alongside
+        // the live enrolled record — revoke must clear both.
+        s.approve("01ARZ", PUBA, "usr_op", APPROVED_AT)
+            .await
+            .unwrap();
+        s.record_pending("01ARZ", PUBB, &b, "usr_op", "ip", 0)
+            .await
+            .unwrap();
+        let out = s.revoke("01ARZ", "usr_rev", APPROVED_AT).await.unwrap();
+        assert!(out.was_enrolled);
+        assert!(out.removed_pending);
+        assert!(s.get_enrolled("01ARZ").await.unwrap().is_none());
+        assert!(s.get_pending("01ARZ").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn revoke_without_a_pending_record_reports_none_removed() {
+        let (_d, s) = store().await;
+        s.approve("01ARZ", PUBA, "usr_op", APPROVED_AT)
+            .await
+            .unwrap();
+        let out = s.revoke("01ARZ", "usr_rev", APPROVED_AT).await.unwrap();
+        assert!(out.was_enrolled);
+        assert!(
+            !out.removed_pending,
+            "approve already consumed the pending record"
+        );
     }
 
     #[tokio::test]

@@ -26,6 +26,11 @@ roles_dir = "examples/demo_roles"
 # Each role's template defaults to <roles_dir>/<name>.json (demo ->
 # examples/demo_roles/demo.json); set policy_file only to override.
 
+# Lifetime (seconds) of the credential ticket a client gets at enroll and
+# presents at exchange. Multi-use within this window; defaults to 86400
+# (24h). Must be > 0.
+# ticket_ttl_secs = 86400
+
 # Listener transport (docs/design-mint.md § "Transport"). `bind` and
 # `socket` are mutually exclusive. The bundled single-host dev shape
 # (coordinator + mint co-resident) uses the UDS listener:
