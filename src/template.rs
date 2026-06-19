@@ -2,17 +2,16 @@
 //!
 //! A role's policy template is **JSON** carrying `{{ ns.key }}` scalar
 //! substitution tokens, each token sitting inside a JSON *string value*.
-//! Four namespaces, each a flat scalar lookup — **every one MAC-verified
+//! Three namespaces, each a flat scalar lookup — **every one MAC-verified
 //! or server-side** (`docs/design-mint.md` § *Templating*):
 //!
 //! - `{{env.X}}`      — sealed server-side config (the `[env]` table).
-//! - `{{attested.X}}` — values attested by a discharge authority, carried
-//!   on the discharge and MAC'd under its `r`. Restricted to the role's
-//!   declared, sealed `attested` contract.
 //! - `{{mint.X}}`     — mint-computed (`mint.expiry`).
-//! - `{{caveat.X}}`   — MAC-verified caveat values on the primary;
-//!   issuer-stamped (e.g. `caveat.sub`) or holder-appended
-//!   (self-attested attenuation).
+//! - `{{caveat.X}}`   — MAC-verified caveat values on the primary:
+//!   issuer-stamped (e.g. `caveat.sub`), holder-appended (self-attested
+//!   attenuation), or attestation-baked at exchange — a discharge
+//!   authority vouched the value (restricted to the role's sealed
+//!   `attested` contract) and it was baked as an ordinary MAC'd caveat.
 //!
 //! Rendering parses the template as JSON, substitutes into the string
 //! leaves, and re-serialises. Two security properties fall out of that

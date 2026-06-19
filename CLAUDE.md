@@ -168,8 +168,8 @@ validates the value from `(sub, mode)`.
   `TemplateSet` — the request path never re-reads disk. `SealState` is `Serving` or `Dormant`,
   held in an `ArcSwap` so `mint seal` swaps the served surface live, no restart.
 - `role` / `template` / `audit` — role gate, handlebars policy render, JSON audit lines. A policy
-  template substitutes values by provenance: `{{attested.X}}` (discharge-MAC'd), `{{env.X}}`
-  (config), `{{mint.X}}` (mint-computed), `{{caveat.X}}` (MAC-verified).
+  template substitutes values from three namespaces: `{{caveat.X}}` (MAC-verified, including the
+  attestation-baked values), `{{env.X}}` (config), `{{mint.X}}` (mint-computed).
 - `config` — TOML (audience, `data_dir`, `roles_dir`, tenant, per-role metadata). Each role's
   policy template is a separate file under `roles_dir` (`<name>.json`, or `policy_file`). The
   macaroon root key is **not** config. Admin credential from `AWS_*`, never TOML.
