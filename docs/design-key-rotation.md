@@ -2,7 +2,7 @@
 
 Status: **proposed** (not yet implemented).
 
-This document specifies an explicit operation for a coordinator to replace
+This document specifies an explicit operation for a client to replace
 its Ed25519 keypair while keeping its `sub` identity, authorized by key
 continuity alone — no operator in the loop.
 
@@ -12,7 +12,7 @@ error (a key change is no longer a side effect of `/v1/enroll`).
 
 ## Motivation
 
-A coordinator's `sub` is an opaque, durable identity that may be
+A client's `sub` is an opaque, durable identity that may be
 referenced in audit trails, policy, and external systems. Replacing the
 keypair behind it — for routine hygiene or suspected key exposure short
 of full compromise — should not churn that identity.
@@ -29,7 +29,7 @@ clean rotation:
   or compromise (the `revoke` bumps the revocation epoch so the old key's
   credentials die for good), but it requires an operator and a fresh
   out-of-band approval, and it is overkill for a routine key swap by a
-  coordinator that still controls its current key.
+  client that still controls its current key.
 
 Rotation fills the gap: the holder of the current key swaps to a new key
 in one self-service step.
@@ -42,7 +42,7 @@ that binding once, at enrollment, by confirming the original key's
 fingerprint out of band.
 
 Rotation extends that trust along a chain of key-signed swaps: **whoever
-holds the currently-pinned key is the coordinator, and may move the
+holds the currently-pinned key is the client, and may move the
 identity to a new key they also control.** Two proofs are required, or
 the operation is exploitable:
 
@@ -190,7 +190,7 @@ mint client rotate-key [--socket <path>]
 3. `POST /v1/rotate-key`.
 4. On `200`: atomically swaps in the new private key and the returned
    credential ticket, discards the old key.
-5. Re-runs `exchange` for each role the coordinator holds.
+5. Re-runs `exchange` for each role the client holds.
 
 ## Audit
 
