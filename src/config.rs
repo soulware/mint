@@ -211,8 +211,8 @@ pub struct RawAuth {
 /// `[attestation]` table: the attestation plane. `location` is the
 /// discharge URL stamped into the attested third-party caveat of every
 /// role that declares `[role.attestation]` — where the holder fetches the
-/// attestation discharge. A single fixed authority (the attestation
-/// coordinator) for the deployment; absent means no role may declare
+/// attestation discharge. A single fixed attestation authority for the
+/// deployment; absent means no role may declare
 /// attestation. The transport is resolved separately, like the auth
 /// location.
 #[derive(Debug, Clone, Deserialize)]

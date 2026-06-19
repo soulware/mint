@@ -31,7 +31,7 @@ const ROOT: [u8; 32] = [42u8; 32];
 /// handler can stamp the gate TPCs, and reused by [`signed`] to mint the
 /// operator discharge each gate clears.
 const K_M_A: [u8; 32] = [13u8; 32];
-/// The mint↔attestation-coordinator wrapping key. Pre-seeded so the
+/// The mint↔attestation-authority wrapping key. Pre-seeded so the
 /// exchange handler can stamp the volume role's attested TPC, and reused
 /// by [`signed`] to mint the attestation discharge it clears.
 const K_M_B: [u8; 32] = [21u8; 32];
@@ -225,7 +225,7 @@ fn signed(uri: &str, m: &Macaroon, seed: &[u8; 32], extra: &str) -> Request<Body
         if let Caveat::ThirdParty { cid, .. } = c {
             // An enroll/exchange anchor carries a gate TPC the operator
             // discharges; an exchange-finalize intermediate carries the
-            // volume role's attested TPC the attestation coordinator
+            // volume role's attested TPC the attestation authority
             // discharges.
             let discharge = match gate_scope(m) {
                 Some(scope) => gate_discharge(cid, scope),
@@ -478,7 +478,7 @@ async fn app_in_memory() -> (axum::Router, Arc<Mutex<Vec<u8>>>, Arc<Store>) {
 #[tokio::test]
 async fn re_enroll_after_keyring_rotation_lazily_migrates_approval() {
     // Rotation procedure: kid=0 approves; operator rotates keyring;
-    // coordinator restarts → next /v1/enroll fast-path drifts the
+    // client restarts → next /v1/enroll fast-path drifts the
     // record forward to the new current kid, with no operator
     // intervention. Verifies the runtime path of the retain-keychain
     // + lazy-migration design (`docs/design-mint.md` § *Root-key
@@ -528,7 +528,7 @@ async fn re_enroll_after_keyring_rotation_lazily_migrates_approval() {
         "record stays on its issuing kid until migrated",
     );
 
-    // (3) coordinator restarts → re-runs /v1/enroll. Fast path matches
+    // (3) client restarts → re-runs /v1/enroll. Fast path matches
     // (same sub/cnf) and the handler opportunistically re-MACs.
     let (status, _) = parts(
         app.clone()
@@ -792,7 +792,7 @@ async fn gates_carry_tpc_but_credential_does_not() {
 
     // An attested role (`volume-ro`) instead yields a short-lived
     // intermediate carrying exactly the volume attested TPC the attestation
-    // coordinator clears at exchange-finalize.
+    // authority clears at exchange-finalize.
     let (status, body) = parts(
         app.oneshot(signed(
             "/v1/enroll-exchange",

@@ -170,7 +170,7 @@ fn build_attested_primary(mode: &str) -> Macaroon {
     cred.attenuate(tpc_cv)
 }
 
-/// Mint a discharge the way the attestation coordinator would: recover
+/// Mint a discharge the way the attestation authority would: recover
 /// `r` from the attested TPC's CID under `K_M-B` (coord B has no `K_M`,
 /// so it cannot re-derive `r` — it must decrypt the CID), then mint
 /// rooted at that `r`. Proves the verifier's VID-side `r` and coord B's
@@ -440,7 +440,7 @@ async fn verifies_attested_primary_and_coord_b_discharge() {
 
 #[tokio::test]
 async fn rejects_attested_discharge_transplanted_across_modes() {
-    // The cross-mode transplant: the same coordinator holds a volume-ro
+    // The cross-mode transplant: the same client holds a volume-ro
     // and a volume-rw credential. A discharge coord B mints for the
     // volume-ro caveat names that caveat's ticket (derived from its CID),
     // so it does not match the volume-rw credential's TPC and is rejected

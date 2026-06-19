@@ -73,7 +73,7 @@ mint enroll list / approve <sub> / revoke <sub>
 mint role list / inspect <name>
 ```
 
-Client side (the coordinator's half; identity under `./mint_client`):
+Client side (the client's half; identity under `./mint_client`):
 ```sh
 mint client fingerprint                         # mints identity on first use; operator compares this during approve
 mint client enroll  --id <sub> <invite>         # attenuates the invite with sub+cnf
@@ -89,7 +89,7 @@ end-to-end tests (the elide workspace cannot link mint as a library).
 ## Architecture
 
 ### Caveat vocabulary (from the RFCs, see README)
-`aud`, `exp`, `sub` (opaque principal — a coordinator ULID), `cnf` (RFC 7800 holder-of-key,
+`aud`, `exp`, `sub` (opaque principal — a client ULID), `cnf` (RFC 7800 holder-of-key,
 `ed25519:<pub>`) are standard. Mint-coined: `op` (endpoint partition — **positively required**
 at every endpoint, never absence-tested; values `enroll` / `enroll-exchange` / `exchange-finalize`
 / `assume-role`), `role`, `epoch` (revocation generation), `invite` (rotation nonce). `caveat::name`

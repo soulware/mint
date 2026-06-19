@@ -55,7 +55,7 @@ pub enum EnrollError {
 /// Fixed `client_id` bound into the **invite's** third-party caveat (the
 /// enroll gate). The invite is one shared macaroon org-wide — one org,
 /// one enroll gate — so its single `CID` means one enroll-gate discharge
-/// can bring in any number of coordinators
+/// can bring in any number of clients
 /// (`docs/design-auth-service.md` § *Coord ↔ mint enrollment*).
 pub const INVITE_CLIENT_ID: &str = "invite";
 

@@ -810,7 +810,7 @@ async fn enroll(State(state): State<AppState>, headers: HeaderMap, body: Bytes) 
     // The enrolling operator's identity, from the enroll-gate discharge's
     // `sub` — recorded on the pending entry as `requested_by`. Read from
     // the discharge's context, distinct from the primary's self-asserted
-    // `sub` (the enrolling coordinator). A discharge always carries it;
+    // `sub` (the enrolling client). A discharge always carries it;
     // absence is a malformed discharge.
     let requested_by = match EffectiveCaveats::new(&cleared.discharge_caveats).resolve(name::SUB) {
         Resolved::Value(s) => s,

@@ -375,16 +375,16 @@ mod tests {
     fn caveat_sub_comes_from_the_chain() {
         // `{{caveat.sub}}` substitutes the MAC-verified principal from the
         // primary's caveat chain.
-        const TPL_SUB: &str = r#"{"Resource":["arn:aws:s3:::b/coordinators/{{caveat.sub}}/*"]}"#;
+        const TPL_SUB: &str = r#"{"Resource":["arn:aws:s3:::b/clients/{{caveat.sub}}/*"]}"#;
         let out = render_policy(
             TPL_SUB,
             &env(),
-            &cv(&[("sub", "COORD1"), ("aud", "mint")]),
+            &cv(&[("sub", "CLIENT1"), ("aud", "mint")]),
             "t",
             "coord-rw",
         )
         .unwrap();
-        assert!(out.contains("coordinators/COORD1/*"), "got: {out}");
+        assert!(out.contains("clients/CLIENT1/*"), "got: {out}");
     }
 
     #[test]
@@ -398,12 +398,12 @@ mod tests {
         let out = render_policy(
             TPL_TEAM,
             &env(),
-            &cv(&[("sub", "COORD1"), ("team", "blue")]),
+            &cv(&[("sub", "CLIENT1"), ("team", "blue")]),
             "t",
             "scratch",
         )
         .unwrap();
-        assert!(out.contains("b/COORD1/blue/*"), "got: {out}");
+        assert!(out.contains("b/CLIENT1/blue/*"), "got: {out}");
     }
 
     #[test]

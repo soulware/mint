@@ -137,7 +137,7 @@ pub struct Enrolled {
     /// Keyring generation that MAC'd this record. Retired kids fail
     /// verification — that is the rotation invalidation step.
     pub kid: Kid,
-    /// Per-coordinator revocation epoch. Stamped onto every credential
+    /// Per-client revocation epoch. Stamped onto every credential
     /// minted for this `sub` at `enroll-exchange` and re-checked at
     /// `assume-role`; a `revoke` bumps the high-water (via the
     /// tombstone) so credentials minted before it never clear again,
@@ -150,7 +150,7 @@ pub struct Enrolled {
 }
 
 /// One revocation tombstone (`_mint/clients/revoked/<sub>`). Written by
-/// [`Store::revoke`] when a coordinator is de-authorized; it carries the
+/// [`Store::revoke`] when a client is de-authorized; it carries the
 /// **high-water `rev_epoch`** — the value the killed credentials were
 /// stamped with — so a later [`Store::approve`] resumes the counter one
 /// above it and old credentials can never clear again. Deleted at
@@ -167,7 +167,7 @@ pub struct Revoked {
     /// The revoking operator's `Subject`, taken from the admin-plane
     /// discharge at `mint enroll revoke`. Part of the body MAC.
     pub revoked_by: String,
-    /// RFC 3339 timestamp the operator revoked the coordinator.
+    /// RFC 3339 timestamp the operator revoked the client.
     pub revoked_at: String,
     /// Keyring generation that MAC'd this tombstone.
     pub kid: Kid,
@@ -422,9 +422,9 @@ pub struct Store {
     /// `/v1/mint/enroll` (separate PR). Immutable for the lifetime
     /// of the process — rotation lands on a new Store via restart.
     k_m_a: Option<Arc<[u8; 32]>>,
-    /// The attestation-coordinator wrapping key. `None` for a mint with
+    /// The attestation-authority wrapping key. `None` for a mint with
     /// no attestation roles. In demo mode mint generates K_M-B itself at
-    /// first start; in prod the attestation coordinator provisions it
+    /// first start; in prod the attestation authority provisions it
     /// via enrollment (separate PR). Immutable for the lifetime of the
     /// process. Kept distinct from [`k_m_a`](Store::k_m_a) so attested
     /// and auth discharges never share a CID-wrapping key.
@@ -1016,7 +1016,7 @@ impl Store {
         Ok(())
     }
 
-    /// Revoke a coordinator: write a tombstone at the high-water
+    /// Revoke a client: write a tombstone at the high-water
     /// `rev_epoch`, delete its enrolled record, and drop any in-flight
     /// pending record (`docs/design-mint.md` § *Revocation*). Clearing
     /// the pending record gives the operator one verb to reject an
@@ -1777,7 +1777,7 @@ mod tests {
         let k_m_a = *s.k_m_a().expect("k_m_a present");
         let k_m_b = *s.k_m_b().expect("k_m_b present");
         // Distinct keys, distinct files — never the same bytes even when
-        // one coordinator plays both authorities.
+        // one process plays both authorities.
         assert_ne!(k_m_a, k_m_b);
         let meta = std::fs::metadata(d.path().join(K_M_B_FILE)).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
@@ -2607,7 +2607,7 @@ mod tests {
     async fn revoke_drops_an_in_flight_pending_record() {
         let (_d, s) = store().await;
         let b = s.current_invite().await.unwrap();
-        // A coordinator that enrolled but was never approved.
+        // A client that enrolled but was never approved.
         s.record_pending("01ARZ", PUBA, &b, "usr_op", "ip", 0)
             .await
             .unwrap();

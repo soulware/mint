@@ -221,12 +221,12 @@ enum EnrollCmd {
         #[arg(long)]
         yes: bool,
     },
-    /// Revoke a coordinator by its `sub` — kills every credential it
+    /// Revoke a client by its `sub` — kills every credential it
     /// holds and drops it to the operator-gated slow path.
     Revoke {
         #[arg(long, env = "MINT_CONFIG", default_value = "mint.toml")]
         config: PathBuf,
-        /// The opaque principal id of the coordinator to revoke.
+        /// The opaque principal id of the client to revoke.
         sub: String,
         /// Skip the interactive confirmation.
         #[arg(long)]
@@ -412,7 +412,7 @@ async fn open_store(cfg: &Config) -> Result<(Store, TigrisHandles), Box<dyn std:
     // K_M-B is needed when a role carries an attested third-party caveat
     // to stamp, or when mint colocates the demo attestation authority.
     // Like the other secrets, demo mode generates it locally — for a
-    // co-located attestation coordinator (which reads the same file) or
+    // co-located attestation authority (which reads the same file) or
     // the demo authority alike; a production mint has it provisioned
     // out-of-band by its attestation authority.
     let attest_demo = cfg.demo_attestation.as_ref().is_some_and(|d| d.enabled);
@@ -685,7 +685,7 @@ async fn enroll_revoke(
         eprintln!("revoke enrollment:");
         eprintln!("  sub: {sub}");
         eprint!(
-            "Revoke? This kills every credential this coordinator holds \
+            "Revoke? This kills every credential this client holds \
              and drops it to the operator-gated slow path; live S3 access \
              dies within one keypair TTL. [y/N] "
         );
