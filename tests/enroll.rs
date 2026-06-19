@@ -478,7 +478,7 @@ async fn app_in_memory() -> (axum::Router, Arc<Mutex<Vec<u8>>>, Arc<Store>) {
 #[tokio::test]
 async fn re_enroll_after_keyring_rotation_lazily_migrates_approval() {
     // Rotation procedure: kid=0 approves; operator rotates keyring;
-    // coordinator restarts → next /v1/enroll fast-path drifts the
+    // client restarts → next /v1/enroll fast-path drifts the
     // record forward to the new current kid, with no operator
     // intervention. Verifies the runtime path of the retain-keychain
     // + lazy-migration design (`docs/design-mint.md` § *Root-key
@@ -528,7 +528,7 @@ async fn re_enroll_after_keyring_rotation_lazily_migrates_approval() {
         "record stays on its issuing kid until migrated",
     );
 
-    // (3) coordinator restarts → re-runs /v1/enroll. Fast path matches
+    // (3) client restarts → re-runs /v1/enroll. Fast path matches
     // (same sub/cnf) and the handler opportunistically re-MACs.
     let (status, _) = parts(
         app.clone()

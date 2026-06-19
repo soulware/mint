@@ -440,7 +440,7 @@ async fn verifies_attested_primary_and_coord_b_discharge() {
 
 #[tokio::test]
 async fn rejects_attested_discharge_transplanted_across_modes() {
-    // The cross-mode transplant: the same coordinator holds a volume-ro
+    // The cross-mode transplant: the same client holds a volume-ro
     // and a volume-rw credential. A discharge coord B mints for the
     // volume-ro caveat names that caveat's ticket (derived from its CID),
     // so it does not match the volume-rw credential's TPC and is rejected

@@ -221,12 +221,12 @@ enum EnrollCmd {
         #[arg(long)]
         yes: bool,
     },
-    /// Revoke a coordinator by its `sub` — kills every credential it
+    /// Revoke a client by its `sub` — kills every credential it
     /// holds and drops it to the operator-gated slow path.
     Revoke {
         #[arg(long, env = "MINT_CONFIG", default_value = "mint.toml")]
         config: PathBuf,
-        /// The opaque principal id of the coordinator to revoke.
+        /// The opaque principal id of the client to revoke.
         sub: String,
         /// Skip the interactive confirmation.
         #[arg(long)]
@@ -685,7 +685,7 @@ async fn enroll_revoke(
         eprintln!("revoke enrollment:");
         eprintln!("  sub: {sub}");
         eprint!(
-            "Revoke? This kills every credential this coordinator holds \
+            "Revoke? This kills every credential this client holds \
              and drops it to the operator-gated slow path; live S3 access \
              dies within one keypair TTL. [y/N] "
         );

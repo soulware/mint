@@ -300,7 +300,7 @@ pub struct RevokeResponse {
     pub removed_pending: bool,
 }
 
-/// Revoke a coordinator by `sub` — delete its enrolled record, drop any
+/// Revoke a client by `sub` — delete its enrolled record, drop any
 /// in-flight pending record, and write the revocation tombstone
 /// (`docs/design-mint.md` § *Revocation*).
 async fn handle_revoke(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
