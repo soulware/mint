@@ -55,7 +55,7 @@ Mint additionally supports flexible `{{caveat.X}}` expressions fulfilled by the 
 
 ## Getting Started
 
-Initial configuration and Tigris admin credential management -
+Initial configuration, admin key management and running the mint server -
 ```bash
 cp examples/mint-demo.toml ./mint-demo.toml   # then edit bucket name (note: store.bucket and env.bucket)
 export MINT_CONFIG=./mint-demo.toml
@@ -68,26 +68,16 @@ export MINT_CONFIG=./mint-demo.toml
 
 # (A) Tigris admin credentials in 1Password
 cp examples/mint-demo.env ./mint-demo.env    # then edit to match your vault and path
+op run --env-file ./mint-demo.env -- ./target/debug/mint serve
 
 # (B) Tigris admin credentials directly exported
 export AWS_ACCESS_KEY_ID=<KEY_ID>
 export AWS_SECRET_ACCESS_KEY=<SECRET_KEY>
-```
-
-Run the `mint` server -
-
-```bash
-# Build it first
-cargo build
-
-# Then run it via 1Password "op run" -
-op run --env-file ./mint-demo.env -- ./target/debug/mint serve
-
-# Or with admin credentials exported as env vars, simply -
 ./target/debug/mint serve
 ```
 
-With `mint serve` still running we can then interact with it via the mint cli in a new terminal. Note that the mint server by default runs with a demo authentication service available via `auth.sock` locally.
+With `mint serve` running we can interact with it via the mint cli in a new terminal. 
+Note that the mint server by default runs with a demo authentication service available via `auth.sock` locally.
 
 ```bash
 export MINT_CONFIG=./mint-demo.toml
