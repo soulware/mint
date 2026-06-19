@@ -10,10 +10,12 @@ into the fresh-from-root chain — fed by a per-caveat declared *source*.**
 The `[env]` config table and the `{{env.X}}` render namespace are removed.
 
 It is a companion to the enrollment/vending lifecycle in `design-mint.md`
-(elide repo) and to `design-mint-template-seal.md`. Because the
-exchange-request body changes shape and role templates must be rewritten,
-this is a **breaking change coordinated with the elide side** (elide
-authors the values that mint used to hold in `[env]`).
+(elide repo) and to `design-mint-template-seal.md`. The exchange-request
+body changes shape and role templates must be rewritten, so this is a
+**breaking change for the elide side** (elide authors the values mint used
+to hold in `[env]`). mint can land it standalone, though: the in-tree
+reference client moves with the change, and elide adapts to the new
+exchange contract on its own schedule — there is no lockstep requirement.
 
 ## Motivation
 
@@ -251,10 +253,13 @@ change to the baking machinery, which is the point of the unified model.
   (with `X` declared in `holder`/`attested`) or an inlined literal. A
   leftover `{{env.X}}` now fails seal as a malformed-token, the same way a
   stale `{{attested.X}}` already does — a loud, fail-closed migration.
-- **elide side**: elide's environment manifest becomes the single source
-  of truth for the former `[env]` values; the client sends them in the
-  `exchange` body. Coordinate the body-shape change (`mint client exchange`
-  gains `--caveat N=V`, mirroring the existing `assume-role --caveat`).
+- **elide side** (adapts later, not in lockstep): elide's environment
+  manifest becomes the single source of truth for the former `[env]`
+  values, sent in the `exchange` body. The in-tree reference client ships
+  the new body shape with this change — `mint client exchange` gains
+  `--caveat N=V`, mirroring the existing `assume-role --caveat` — so mint
+  is testable end-to-end without elide; elide moves to the new contract
+  when it picks up the release.
 - **Docs**: drop the stale `{{attested.X}}` entry from the module map in
   `CLAUDE.md`/README and replace the four-namespace description with the
   two-namespace one.
