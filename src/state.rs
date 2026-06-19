@@ -422,9 +422,9 @@ pub struct Store {
     /// `/v1/mint/enroll` (separate PR). Immutable for the lifetime
     /// of the process — rotation lands on a new Store via restart.
     k_m_a: Option<Arc<[u8; 32]>>,
-    /// The attestation-coordinator wrapping key. `None` for a mint with
+    /// The attestation-authority wrapping key. `None` for a mint with
     /// no attestation roles. In demo mode mint generates K_M-B itself at
-    /// first start; in prod the attestation coordinator provisions it
+    /// first start; in prod the attestation authority provisions it
     /// via enrollment (separate PR). Immutable for the lifetime of the
     /// process. Kept distinct from [`k_m_a`](Store::k_m_a) so attested
     /// and auth discharges never share a CID-wrapping key.
@@ -1777,7 +1777,7 @@ mod tests {
         let k_m_a = *s.k_m_a().expect("k_m_a present");
         let k_m_b = *s.k_m_b().expect("k_m_b present");
         // Distinct keys, distinct files — never the same bytes even when
-        // one coordinator plays both authorities.
+        // one process plays both authorities.
         assert_ne!(k_m_a, k_m_b);
         let meta = std::fs::metadata(d.path().join(K_M_B_FILE)).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);

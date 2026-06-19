@@ -31,7 +31,7 @@
 //! mode)`, reject if `org_id` is not the org this role serves, then mint
 //! a discharge macaroon chain-MAC'd under `r`, carrying
 //! each requested `(name, value)` as a scalar caveat plus `exp` — the
-//! same caveat shape the attestation coordinator emits. A requested name
+//! same caveat shape the attestation authority emits. A requested name
 //! that collides with a reserved control-caveat name is rejected: each
 //! authority emits only its own vocabulary, never the primary's control
 //! set. The CID's `mode` is recovered but not dispatched on — this
@@ -79,7 +79,7 @@ pub(crate) struct AttestRequest {
 /// Build the attestation-authority router. The caller binds it to its
 /// own listener — a *separate* socket from both the mint role and the
 /// demo auth role, mirroring the per-endpoint listener split the
-/// attestation coordinator uses.
+/// attestation authority uses.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/discharge", post(issue_discharge))

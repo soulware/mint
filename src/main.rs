@@ -412,7 +412,7 @@ async fn open_store(cfg: &Config) -> Result<(Store, TigrisHandles), Box<dyn std:
     // K_M-B is needed when a role carries an attested third-party caveat
     // to stamp, or when mint colocates the demo attestation authority.
     // Like the other secrets, demo mode generates it locally — for a
-    // co-located attestation coordinator (which reads the same file) or
+    // co-located attestation authority (which reads the same file) or
     // the demo authority alike; a production mint has it provisioned
     // out-of-band by its attestation authority.
     let attest_demo = cfg.demo_attestation.as_ref().is_some_and(|d| d.enabled);

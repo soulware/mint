@@ -170,7 +170,7 @@ fn build_attested_primary(mode: &str) -> Macaroon {
     cred.attenuate(tpc_cv)
 }
 
-/// Mint a discharge the way the attestation coordinator would: recover
+/// Mint a discharge the way the attestation authority would: recover
 /// `r` from the attested TPC's CID under `K_M-B` (coord B has no `K_M`,
 /// so it cannot re-derive `r` — it must decrypt the CID), then mint
 /// rooted at that `r`. Proves the verifier's VID-side `r` and coord B's

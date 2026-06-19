@@ -4,7 +4,7 @@
 //! credential → assume-role renders a policy substituting every template
 //! namespace (`env`, `mint`, `caveat` — the attested value now resolves as
 //! `{{caveat.X}}`). The whole mint-as-verifier loop without a live Tigris
-//! or a real coordinator.
+//! or a real attestation authority.
 
 use std::sync::Arc;
 

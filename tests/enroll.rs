@@ -31,7 +31,7 @@ const ROOT: [u8; 32] = [42u8; 32];
 /// handler can stamp the gate TPCs, and reused by [`signed`] to mint the
 /// operator discharge each gate clears.
 const K_M_A: [u8; 32] = [13u8; 32];
-/// The mint↔attestation-coordinator wrapping key. Pre-seeded so the
+/// The mint↔attestation-authority wrapping key. Pre-seeded so the
 /// exchange handler can stamp the volume role's attested TPC, and reused
 /// by [`signed`] to mint the attestation discharge it clears.
 const K_M_B: [u8; 32] = [21u8; 32];
@@ -225,7 +225,7 @@ fn signed(uri: &str, m: &Macaroon, seed: &[u8; 32], extra: &str) -> Request<Body
         if let Caveat::ThirdParty { cid, .. } = c {
             // An enroll/exchange anchor carries a gate TPC the operator
             // discharges; an exchange-finalize intermediate carries the
-            // volume role's attested TPC the attestation coordinator
+            // volume role's attested TPC the attestation authority
             // discharges.
             let discharge = match gate_scope(m) {
                 Some(scope) => gate_discharge(cid, scope),
@@ -792,7 +792,7 @@ async fn gates_carry_tpc_but_credential_does_not() {
 
     // An attested role (`volume-ro`) instead yields a short-lived
     // intermediate carrying exactly the volume attested TPC the attestation
-    // coordinator clears at exchange-finalize.
+    // authority clears at exchange-finalize.
     let (status, body) = parts(
         app.oneshot(signed(
             "/v1/enroll-exchange",
