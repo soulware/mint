@@ -68,6 +68,12 @@ pub struct SealedRole {
     /// declared attestation contract. Sealed alongside
     /// [`caveat`](Self::caveat) and enforced at request time before render.
     pub attested: Vec<String>,
+    /// The caveat names the client supplies in the `enroll-exchange` body
+    /// and mint bakes verbatim — the role's holder-source contract, a
+    /// subset of [`caveat`](Self::caveat). Sealing it pins each value's
+    /// *source*: a host cannot reclassify an `attested` name as
+    /// holder-supplied, a provenance-downgrade defence.
+    pub holder: Vec<String>,
 }
 
 /// The complete seal: every role, plus the audience. MAC'd under one
@@ -134,6 +140,7 @@ impl Seal {
                 policy,
                 attested,
                 caveat,
+                holder,
                 // Read from live config at exchange (like `auth_location`)
                 // and MAC'd into the credential at mint, so it cannot drift
                 // post-issuance — the opaque TPC `mode`, distinct from the
@@ -154,6 +161,7 @@ impl Seal {
                     min_ttl_seconds: *min_ttl_seconds,
                     policy_blake3: hash_hex(policy.as_bytes()),
                     attested: attested.clone(),
+                    holder: holder.clone(),
                 },
             );
         }
@@ -277,6 +285,12 @@ impl Seal {
                 diffs.push(format!(
                     "role {name}: caveat contract sealed as {:?}, local config has {:?}",
                     sealed.caveat, role.caveat,
+                ));
+            }
+            if sealed.holder != role.holder {
+                diffs.push(format!(
+                    "role {name}: holder contract sealed as {:?}, local config has {:?}",
+                    sealed.holder, role.holder,
                 ));
             }
         }
@@ -685,6 +699,53 @@ caveat = ["sub"]
         let diffs = seal.diff_against_config(&drifted);
         assert_eq!(diffs.len(), 1, "diffs: {diffs:?}");
         assert!(diffs[0].contains("caveat contract"), "diff: {:?}", diffs);
+    }
+
+    #[test]
+    fn holder_contract_is_sealed_and_drift_is_diffed() {
+        // The holder source-contract is sealed alongside caveat (a
+        // provenance-downgrade defence): it MACs into the seal, and a host
+        // that drops its local holder declaration is flagged.
+        let kr = Keyring::single([7u8; 32]);
+        let toml = r#"
+audience = "mint"
+[store]
+bucket = "demo-bucket"
+[[role]]
+name = "coord-rw"
+min_ttl_seconds = 60
+max_ttl_seconds = 3600
+default_ttl_seconds = 3600
+policy_file = "coord-rw.json"
+[role.template]
+caveat = ["bucket", "sub"]
+holder = ["bucket"]
+"#;
+        let cfg = parse_for_test(
+            toml,
+            &[(
+                "coord-rw.json",
+                r#"{"r":"{{caveat.bucket}}/{{caveat.sub}}/*"}"#,
+            )],
+        )
+        .expect("parse");
+        let seal = Seal::build_from_config(&cfg, &kr, "t");
+        assert_eq!(seal.roles["coord-rw"].holder, vec!["bucket".to_string()]);
+        assert!(seal.diff_against_config(&cfg).is_empty());
+
+        // Drop the holder declaration locally: same caveat manifest and
+        // templates, different source contract → the seal no longer matches.
+        let drifted = parse_for_test(
+            &toml.replace("holder = [\"bucket\"]\n", ""),
+            &[(
+                "coord-rw.json",
+                r#"{"r":"{{caveat.bucket}}/{{caveat.sub}}/*"}"#,
+            )],
+        )
+        .expect("parse");
+        let diffs = seal.diff_against_config(&drifted);
+        assert_eq!(diffs.len(), 1, "diffs: {diffs:?}");
+        assert!(diffs[0].contains("holder contract"), "diff: {:?}", diffs);
     }
 
     #[test]
