@@ -43,19 +43,6 @@ use crate::sealed_cache::SealState;
 use crate::state::{Recorded, StateError, Store};
 use crate::template::render_policy;
 
-/// Credential-ticket lifetime. The ticket is multi-use within this
-/// window: one operator approval, then the client exchanges it once
-/// per role it needs (§ *Enrollment*). 10 min is a deliberate choice
-/// — comfortably enough to mint the handful (3–4) of per-role
-/// credentials a client holds, while keeping the pending record (and
-/// so the approval) short-lived. If it lapses the client just
-/// re-enrols (idempotent for the same `(sub, pub)` → fresh ticket);
-/// a *new* role after expiry needs a fresh approval, by design.
-const CREDENTIAL_TICKET_TTL_SECONDS: u64 = 600;
-/// Unapproved pending records age out past this (≥ the credential
-/// ticket `exp`, so a still-usable ticket always has its record).
-const PENDING_MAX_AGE_SECONDS: u64 = 3600;
-
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
@@ -751,11 +738,6 @@ async fn enroll(State(state): State<AppState>, headers: HeaderMap, body: Bytes) 
         });
     };
 
-    // Opportunistic GC keeps the pending table transient.
-    if let Err(e) = state.store.gc(now_unix, PENDING_MAX_AGE_SECONDS).await {
-        tracing::warn!(error = %e, "pending gc failed");
-    }
-
     // The bundle is the client-attenuated invite (`op=enroll`, current
     // `invite`, self-asserted `sub`/`cnf`) plus the enrolling operator's
     // discharge for the invite's enroll-gate TPC. `verify_and_clear`
@@ -912,7 +894,7 @@ async fn enroll(State(state): State<AppState>, headers: HeaderMap, body: Bytes) 
         &state.config.audience,
         &sub,
         &cnf,
-        now_unix.saturating_add(CREDENTIAL_TICKET_TTL_SECONDS),
+        now_unix.saturating_add(state.config.ticket_ttl_secs),
         &org_id,
         location,
     );

@@ -296,10 +296,13 @@ pub struct RevokeResponse {
     /// was already revoked or never enrolled — the tombstone is still
     /// written/kept, so the call is idempotent and fail-safe).
     pub was_enrolled: bool,
+    /// Whether an in-flight pending record was present and dropped.
+    pub removed_pending: bool,
 }
 
-/// Revoke a coordinator by `sub` — delete its enrolled record and write
-/// the revocation tombstone (`docs/design-mint.md` § *Revocation*).
+/// Revoke a coordinator by `sub` — delete its enrolled record, drop any
+/// in-flight pending record, and write the revocation tombstone
+/// (`docs/design-mint.md` § *Revocation*).
 async fn handle_revoke(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     let revoked_by = match verify_discharge(&state, &headers, &body, ADMIN_ENROLL_REVOKE).await {
         Ok(s) => s,
@@ -315,6 +318,7 @@ async fn handle_revoke(State(state): State<AppState>, headers: HeaderMap, body: 
             revoked_at,
             rev_epoch: outcome.rev_epoch,
             was_enrolled: outcome.was_enrolled,
+            removed_pending: outcome.removed_pending,
         }),
         Err(e) => service_unavailable(&format!("revoke: {e}")),
     }

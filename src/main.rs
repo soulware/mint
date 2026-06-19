@@ -702,14 +702,19 @@ async fn enroll_revoke(
         sub: sub.to_owned(),
     };
     let resp = mint::admin::revoke_enrollment(admin_target(&config), &op, &discharge, &req).await?;
+    let pending_note = if resp.removed_pending {
+        "; in-flight pending record dropped"
+    } else {
+        ""
+    };
     if resp.was_enrolled {
         eprintln!(
-            "revoked {sub} at {} (epoch {}; enrolled record deleted, tombstone written)",
+            "revoked {sub} at {} (epoch {}; enrolled record deleted, tombstone written{pending_note})",
             resp.revoked_at, resp.rev_epoch
         );
     } else {
         eprintln!(
-            "revoked {sub} at {} (epoch {}; no live enrolled record — tombstone written/kept)",
+            "revoked {sub} at {} (epoch {}; no live enrolled record — tombstone written/kept{pending_note})",
             resp.revoked_at, resp.rev_epoch
         );
     }
