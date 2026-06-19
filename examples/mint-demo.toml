@@ -29,7 +29,7 @@ roles_dir = "examples/demo_roles"
 # Lifetime (seconds) of the credential ticket a client gets at enroll and
 # presents at exchange. Multi-use within this window; defaults to 86400
 # (24h). Must be > 0.
-# ticket_ttl_secs = 86400
+# ticket_ttl_seconds = 86400
 
 # Listener transport (docs/design-mint.md § "Transport"). `bind` and
 # `socket` are mutually exclusive. The bundled single-host dev shape
@@ -109,3 +109,10 @@ caveat = ["path", "sub"]
 [role.attestation]
 # mode = "demo-attested"
 attested = ["path"]
+# Lifetime, in seconds, of the `op=exchange-finalize` intermediate handed
+# back at `enroll-exchange` (step 1). Required on every attested role. `0` ⟹
+# the intermediate carries no `exp`: the holder keeps it and finalizes
+# per-use for its lifetime (e.g. a coordinator minting a credential per
+# volume). A positive value (e.g. 600) bounds it to a single prompt,
+# back-to-back finalize.
+intermediate_ttl_seconds = 0

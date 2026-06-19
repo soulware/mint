@@ -64,6 +64,7 @@ policy_file = "volume-ro.json"
 caveat = ["volume"]
 [role.attestation]
 attested = ["volume"]
+intermediate_ttl_seconds = 0
 [[role]]
 name = "volume-rw"
 min_ttl_seconds = 60
@@ -320,9 +321,10 @@ async fn full_flow_enroll_approve_exchange_then_assume_role() {
         .await
         .unwrap();
 
-    // (4) exchange the attested `volume-ro` role → a short-lived
-    // intermediate (op=exchange-finalize) carrying the volume attested TPC,
-    // step 1 of two.
+    // (4) exchange the attested `volume-ro` role → the intermediate
+    // (op=exchange-finalize) carrying the volume attested TPC, step 1 of
+    // two. The role sets `intermediate_ttl_seconds = 0`, so the intermediate
+    // carries no `exp`: the holder keeps it and finalizes per-volume.
     let (status, body) = parts(
         app.clone()
             .oneshot(signed(
@@ -346,6 +348,11 @@ async fn full_flow_enroll_approve_exchange_then_assume_role() {
         tpc_count(&intermediate),
         1,
         "intermediate carries the volume attested TPC"
+    );
+    assert_eq!(
+        EffectiveCaveats::new(intermediate.caveats()).min_bound(name::EXP),
+        None,
+        "intermediate_ttl_seconds = 0 ⟹ the intermediate carries no exp"
     );
 
     // (4b) finalize → the credential, with the attested volume baked in as
@@ -911,4 +918,178 @@ async fn exchange_without_approval_returns_403_awaiting() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+/// Like [`volume_discharge`] but attesting an arbitrary `volume`: coord B
+/// derives the value per finalize, so a single intermediate finalizes for
+/// arbitrarily many distinct volumes.
+fn volume_discharge_for(cid: &[u8], volume: &str) -> Macaroon {
+    let pt = tpc::decrypt_cid_attested(&K_M_B, cid).expect("cid decrypts under K_M-B");
+    mint_under_key_with_nonce(
+        &pt.r,
+        KeyRef::Discharge,
+        tpc::ticket_id(cid),
+        vec![
+            Caveat::scalar("volume", volume),
+            Caveat::scalar(name::EXP, far_future().to_string()),
+        ],
+    )
+}
+
+/// A signed `POST /v1/exchange-finalize` request presenting `m` (the
+/// intermediate) plus a fresh coord-B discharge attesting `volume`. Mirrors
+/// [`signed`], but lets each finalize name its own volume.
+fn signed_finalize(m: &Macaroon, seed: &[u8; 32], volume: &str) -> Request<Body> {
+    let body = format!("{{\"ts\":{}}}", now());
+    let sig = pop::client_signature(&SigningKey::from_bytes(seed), m.tail(), body.as_bytes());
+    let mut auth = format!("MintV1 {}", m.encode());
+    for c in m.caveats() {
+        if let Caveat::ThirdParty { cid, .. } = c {
+            auth.push(',');
+            auth.push_str(&volume_discharge_for(cid, volume).encode());
+        }
+    }
+    Request::builder()
+        .method("POST")
+        .uri("/v1/exchange-finalize")
+        .header("authorization", auth)
+        .header("x-mint-pop", sig)
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+/// Run enroll → approve → enroll-exchange for the attested `volume-ro` role
+/// and return its `op=exchange-finalize` intermediate. The role sets
+/// `intermediate_ttl_seconds = 0`, so the intermediate carries no `exp` —
+/// the holder keeps it and finalizes per-volume.
+async fn volume_ro_intermediate(app: &axum::Router, store: &Store) -> Macaroon {
+    let nonce = store.current_invite().await.unwrap();
+    let cb = client_invite(&nonce, &CLIENT_SEED);
+    let (status, body) = parts(
+        app.clone()
+            .oneshot(signed("/v1/enroll", &cb, &CLIENT_SEED, ""))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "enroll body: {body}");
+    let ticket = field(&body, "credential.ticket");
+    store
+        .approve(
+            SUB,
+            &pop::cnf_value(&SigningKey::from_bytes(&CLIENT_SEED)),
+            "usr_op",
+            &now_iso(),
+        )
+        .await
+        .unwrap();
+    let (status, body) = parts(
+        app.clone()
+            .oneshot(signed(
+                "/v1/enroll-exchange",
+                &ticket,
+                &CLIENT_SEED,
+                r#","role":"volume-ro""#,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "exchange body: {body}");
+    field(&body, "credential")
+}
+
+/// One durable intermediate finalizes for arbitrarily many distinct volumes:
+/// it carries no `volume` itself, so each finalize supplies its own via the
+/// coord-B discharge and bakes exactly that value. (Spec property 5.)
+#[tokio::test]
+async fn durable_intermediate_finalizes_for_many_volumes() {
+    let (app, _audit, store, _dir) = app().await;
+    let intermediate = volume_ro_intermediate(&app, &store).await;
+    for vol in [
+        "01JQAAAAAAAAAAAAAAAAAAAAAA",
+        "01JQBBBBBBBBBBBBBBBBBBBBBB",
+        "01JQCCCCCCCCCCCCCCCCCCCCCC",
+    ] {
+        let (status, body) = parts(
+            app.clone()
+                .oneshot(signed_finalize(&intermediate, &CLIENT_SEED, vol))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "finalize {vol} body: {body}");
+        let credential = field(&body, "credential");
+        let eff = EffectiveCaveats::new(credential.caveats());
+        assert_eq!(
+            eff.resolve(name::OP),
+            Resolved::Value(op::ASSUME_ROLE.into())
+        );
+        assert_eq!(
+            eff.resolve("volume"),
+            Resolved::Value(vol.into()),
+            "each finalize bakes its own volume from the discharge"
+        );
+        assert_eq!(eff.min_bound(name::EXP), None, "credential does not expire");
+    }
+}
+
+/// An operator revoke kills the long-lived intermediate: a finalize that
+/// succeeds while enrolled is refused once the record is gone, even though
+/// the intermediate itself never expires. (Spec property 3/4.)
+#[tokio::test]
+async fn revoke_invalidates_finalize_of_durable_intermediate() {
+    let (app, _audit, store, _dir) = app().await;
+    let intermediate = volume_ro_intermediate(&app, &store).await;
+    let (status, _) = parts(
+        app.clone()
+            .oneshot(signed_finalize(&intermediate, &CLIENT_SEED, VOLUME))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "finalize succeeds while enrolled");
+
+    store.revoke(SUB, "usr_op", &now_iso()).await.unwrap();
+
+    let (status, body) = parts(
+        app.clone()
+            .oneshot(signed_finalize(&intermediate, &CLIENT_SEED, VOLUME))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "finalize after revoke is refused (no enrolled record): {body}"
+    );
+}
+
+/// The intermediate is not an assume-role credential: it carries
+/// `op=exchange-finalize` and no `volume`, so presenting it directly to
+/// `/v1/assume-role` is the opaque 401, never a render. Worth pinning now
+/// that the intermediate is long-lived. (Spec property 2.)
+#[tokio::test]
+async fn durable_intermediate_is_not_usable_at_assume_role() {
+    let (app, _audit, store, _dir) = app().await;
+    let intermediate = volume_ro_intermediate(&app, &store).await;
+    let (status, _) = parts(
+        app.clone()
+            .oneshot(signed(
+                "/v1/assume-role",
+                &intermediate,
+                &CLIENT_SEED,
+                r#","role":"volume-ro","ttl_seconds":3600"#,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "an exchange-finalize intermediate cannot be assumed directly"
+    );
 }

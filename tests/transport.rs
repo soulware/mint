@@ -49,6 +49,7 @@ policy_file = "writer.json"
 caveat = ["project"]
 [role.attestation]
 attested = ["project"]
+intermediate_ttl_seconds = 0
 "#;
 
 fn config() -> Config {

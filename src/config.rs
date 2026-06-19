@@ -27,7 +27,7 @@ pub enum ConfigError {
     DuplicateRole(String),
     #[error("role {role}: {field} must be > 0 and min <= default <= max")]
     BadTtlBounds { role: String, field: String },
-    #[error("ticket_ttl_secs must be > 0")]
+    #[error("ticket_ttl_seconds must be > 0")]
     BadTicketTtl,
     #[error(
         "role {role}: policy_file {value:?} must be a single filename \
@@ -164,10 +164,10 @@ pub struct RawConfig {
     /// Lifetime in seconds of the credential ticket minted at
     /// `/v1/enroll` — the multi-use `op=enroll-exchange` token a client
     /// presents at `/v1/enroll-exchange`. Defaults to
-    /// [`DEFAULT_TICKET_TTL_SECS`] when omitted; must be
+    /// [`DEFAULT_TICKET_TTL_SECONDS`] when omitted; must be
     /// `> 0`.
     #[serde(default)]
-    pub ticket_ttl_secs: Option<u64>,
+    pub ticket_ttl_seconds: Option<u64>,
     pub store: Store,
     /// Flat table of operator-defined scalar values surfaced to role
     /// policy templates as `{{env.X}}` (`docs/design-mint.md` §
@@ -399,6 +399,20 @@ pub struct RawRoleAttestation {
     /// value is baked.
     #[serde(default)]
     pub attested: Vec<String>,
+    /// Lifetime, in seconds, of the `op=exchange-finalize` intermediate
+    /// handed back at `enroll-exchange` (step 1). It stamps the
+    /// intermediate's `exp`, bounding how long the holder may discharge and
+    /// finalize it. **`0` ⟹ no `exp`**: the intermediate never expires, so
+    /// the holder keeps it and finalizes per-use for its lifetime (TOML has
+    /// no nil, so `0` is the no-expiry value). Required on every attested
+    /// role — the intermediate's lifetime is always an explicit, visible
+    /// choice.
+    ///
+    /// A no-`exp` intermediate is still bounded by the attestation key: its
+    /// TPC binds to the current `K_M-B`, so a `K_M-B` rotation makes
+    /// outstanding intermediates undischargeable and the holder re-enrolls
+    /// to mint a fresh one.
+    pub intermediate_ttl_seconds: u64,
 }
 
 /// The `[role.template]` subtable: the `caveat.*` names a role's policy
@@ -462,7 +476,7 @@ pub const DEFAULT_SOCKET_NAME: &str = "mint.sock";
 pub const DEFAULT_DATA_DIR: &str = "mint_data";
 
 /// Credential-ticket lifetime when the config omits
-/// `ticket_ttl_secs`. The ticket is multi-use within this
+/// `ticket_ttl_seconds`. The ticket is multi-use within this
 /// window: one operator approval, then the client exchanges it once per
 /// role it needs (`docs/design-mint.md` § *Enrollment*). 24 h gives a
 /// client comfortable room to enrol, wait for an out-of-band approval,
@@ -470,7 +484,7 @@ pub const DEFAULT_DATA_DIR: &str = "mint_data";
 /// the client just re-enrols (idempotent for the same `(sub, pub)` →
 /// fresh ticket); a *new* role after expiry needs a fresh approval, by
 /// design.
-pub const DEFAULT_TICKET_TTL_SECS: u64 = 24 * 60 * 60;
+pub const DEFAULT_TICKET_TTL_SECONDS: u64 = 24 * 60 * 60;
 
 /// The default UDS path `mint serve` binds and `mint client` dials when
 /// no config selects another: `<DEFAULT_DATA_DIR>/<DEFAULT_SOCKET_NAME>`.
@@ -515,10 +529,10 @@ pub struct Config {
     /// resolved into [`Role::policy`].
     pub roles_dir: PathBuf,
     /// Lifetime in seconds of the credential ticket minted at
-    /// `/v1/enroll`. Resolved from `ticket_ttl_secs`,
-    /// defaulting to [`DEFAULT_TICKET_TTL_SECS`]; validated
+    /// `/v1/enroll`. Resolved from `ticket_ttl_seconds`,
+    /// defaulting to [`DEFAULT_TICKET_TTL_SECONDS`]; validated
     /// `> 0` at load.
-    pub ticket_ttl_secs: u64,
+    pub ticket_ttl_seconds: u64,
     /// The resolved listener transport. The CLI may still override this
     /// with an explicit `--bind` (the TCP single-host override).
     pub listener: Listener,
@@ -580,6 +594,14 @@ pub struct Role {
     /// verbatim for the attestation authority
     /// (`docs/design-mint.md` § *Attestation contract*).
     pub attestation_mode: Option<String>,
+    /// The `op=exchange-finalize` intermediate's lifetime in seconds, from
+    /// `[role.attestation].intermediate_ttl_seconds` — `Some` exactly when
+    /// the role is attested (the intermediate only exists for attested
+    /// roles), `None` otherwise. `Some(0)` ⟹ the intermediate carries no
+    /// `exp` and is held for the holder's lifetime; `Some(n>0)` ⟹ it
+    /// expires after `n` seconds. `enroll_exchange` turns this into the
+    /// intermediate's `exp`.
+    pub intermediate_ttl_seconds: Option<u64>,
 }
 
 impl Config {
@@ -608,10 +630,10 @@ impl Config {
             .roles_dir
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("mint_roles"));
-        let ticket_ttl_secs = match raw.ticket_ttl_secs {
+        let ticket_ttl_seconds = match raw.ticket_ttl_seconds {
             Some(0) => return Err(ConfigError::BadTicketTtl),
             Some(ttl) => ttl,
-            None => DEFAULT_TICKET_TTL_SECS,
+            None => DEFAULT_TICKET_TTL_SECONDS,
         };
         // Flatten the two planes into their resolved scalar location +
         // demo-colocation parts; everything downstream consumes those.
@@ -647,11 +669,12 @@ impl Config {
                 });
             }
             let caveat = canonical_field_set(r.template.caveat);
-            let (attestation_mode, attested) = match r.attestation {
-                None => (None, Vec::new()),
+            let (attestation_mode, attested, intermediate_ttl_seconds) = match r.attestation {
+                None => (None, Vec::new(), None),
                 Some(a) => (
                     Some(a.mode.unwrap_or_else(|| r.name.clone())),
                     canonical_field_set(a.attested),
+                    Some(a.intermediate_ttl_seconds),
                 ),
             };
             // The attested names are baked as ordinary caveats and resolved
@@ -683,6 +706,7 @@ impl Config {
                 attested,
                 caveat,
                 attestation_mode,
+                intermediate_ttl_seconds,
             };
             if roles.insert(r.name.clone(), role).is_some() {
                 return Err(ConfigError::DuplicateRole(r.name));
@@ -737,7 +761,7 @@ impl Config {
             audience: raw.audience,
             data_dir,
             roles_dir,
-            ticket_ttl_secs,
+            ticket_ttl_seconds,
             listener,
             store: raw.store,
             env,
@@ -977,6 +1001,7 @@ max_ttl_seconds = 100
 default_ttl_seconds = 100
 policy_file = "volume-rw.json"
 [role.attestation]
+intermediate_ttl_seconds = 0
 [[role]]
 name = "volume-ro"
 min_ttl_seconds = 60
@@ -985,6 +1010,7 @@ default_ttl_seconds = 100
 policy_file = "volume-ro.json"
 [role.attestation]
 mode = "custom-ancestor"
+intermediate_ttl_seconds = 600
 [[role]]
 name = "coord-base"
 min_ttl_seconds = 60
@@ -1020,6 +1046,21 @@ policy_file = "coord-base.json"
             Some("custom-ancestor")
         );
         assert_eq!(c.roles["coord-base"].attestation_mode, None);
+        // The intermediate lifetime resolves per attested role: `0` ⟹ a
+        // no-`exp` intermediate the holder finalizes per-use; `n > 0` ⟹ one
+        // that expires. A role with no [role.attestation] carries none.
+        assert_eq!(c.roles["volume-rw"].intermediate_ttl_seconds, Some(0));
+        assert_eq!(c.roles["volume-ro"].intermediate_ttl_seconds, Some(600));
+        assert_eq!(c.roles["coord-base"].intermediate_ttl_seconds, None);
+    }
+
+    #[test]
+    fn attestation_role_without_intermediate_ttl_is_rejected_at_load() {
+        // `intermediate_ttl_seconds` is required on every attested role, so
+        // the intermediate's lifetime is always an explicit, visible
+        // choice — omitting it is a parse error, not a silent default.
+        let toml = ATTESTATION_SAMPLE.replace("intermediate_ttl_seconds = 0\n", "");
+        assert!(parse_for_test(&toml, &[("volume-rw.json", "{}")]).is_err());
     }
 
     #[test]
@@ -1160,6 +1201,7 @@ policy_file = "r.json"
 caveat = [{caveat}]
 [role.attestation]
 attested = [{attested}]
+intermediate_ttl_seconds = 0
 "#
         )
     }
@@ -1307,24 +1349,24 @@ attested = [{attested}]
     #[test]
     fn ticket_ttl_defaults_when_omitted() {
         let c = parse_for_test(SAMPLE, &[("volume-ro.json", "{}")]).expect("parse");
-        assert_eq!(c.ticket_ttl_secs, DEFAULT_TICKET_TTL_SECS);
+        assert_eq!(c.ticket_ttl_seconds, DEFAULT_TICKET_TTL_SECONDS);
     }
 
     #[test]
     fn ticket_ttl_is_overridable() {
         let toml = SAMPLE.replace(
             "audience = \"mint\"",
-            "audience = \"mint\"\nticket_ttl_secs = 1800",
+            "audience = \"mint\"\nticket_ttl_seconds = 1800",
         );
         let c = parse_for_test(&toml, &[("volume-ro.json", "{}")]).expect("parse");
-        assert_eq!(c.ticket_ttl_secs, 1800);
+        assert_eq!(c.ticket_ttl_seconds, 1800);
     }
 
     #[test]
     fn rejects_zero_ticket_ttl() {
         let toml = SAMPLE.replace(
             "audience = \"mint\"",
-            "audience = \"mint\"\nticket_ttl_secs = 0",
+            "audience = \"mint\"\nticket_ttl_seconds = 0",
         );
         assert!(matches!(
             parse_for_test(&toml, &[("volume-ro.json", "{}")]),

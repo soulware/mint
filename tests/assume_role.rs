@@ -53,6 +53,7 @@ policy_file = "volume-ro.json"
 caveat = ["volume"]
 [role.attestation]
 attested = ["volume"]
+intermediate_ttl_seconds = 0
 "#;
 
 const POLICY: &str = r#"

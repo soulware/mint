@@ -134,10 +134,13 @@ enrollments; outstanding primaries are unaffected.
 credential is a bare primary.
 
 **Attestation is point-in-time, at exchange.** A role declaring `[role.attestation]` exchanges in
-two steps: `POST /v1/enroll-exchange` returns a short-lived `op=exchange-finalize` *intermediate*
+two steps: `POST /v1/enroll-exchange` returns an `op=exchange-finalize` *intermediate*
 carrying an undischarged attested third-party caveat; the client discharges it at the attestation
 authority and `POST /v1/exchange-finalize` **bakes** the attested values into the credential as
-ordinary MAC'd caveats. Thereafter they are indistinguishable from the issuer-stamped `sub` and
+ordinary MAC'd caveats. The intermediate's lifetime is the role's required
+`[role.attestation].intermediate_ttl_seconds`: `0` ⟹ no `exp`, so the holder keeps it and finalizes
+per-use (e.g. a coordinator minting a credential per volume); `n > 0` ⟹ it expires after `n` seconds
+(a single back-to-back finalize). Thereafter they are indistinguishable from the issuer-stamped `sub` and
 render as `{{caveat.X}}` (there is no `{{attested.X}}` namespace). The attested names are declared
 in `[role.attestation].attested` and must be a **subset of** `[role.template].caveat`; an empty
 list is a gate-only role (a discharge is still required to finalize, but no value is baked). The
