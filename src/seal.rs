@@ -139,6 +139,11 @@ impl Seal {
                 // post-issuance — the opaque TPC `mode`, distinct from the
                 // sealed `attested` contract below (the declared keys).
                 attestation_mode: _,
+                // The intermediate's `exp` lifetime is read from live config
+                // at enroll-exchange and stamped onto the intermediate, not
+                // the assume-role credential the seal pins — outside the
+                // sealed TTL bounds (which govern assume-role rendering).
+                intermediate_ttl_seconds: _,
             } = role;
             roles.insert(
                 name.clone(),

@@ -16,9 +16,10 @@
 //!    `POST /v1/enroll-exchange` after operator approval (non-attested
 //!    roles) or at `POST /v1/exchange-finalize` (attested roles, with the
 //!    attested values baked in). Same `sub`/`cnf`; no `exp`.
-//! 4. [`mint_intermediate`] — `op=exchange-finalize`, short-lived, minted
-//!    at `POST /v1/enroll-exchange` for an attested role. Carries the
-//!    undischarged attested third-party caveat; step 1 of two.
+//! 4. [`mint_intermediate`] — `op=exchange-finalize`, minted at
+//!    `POST /v1/enroll-exchange` for an attested role. Carries the
+//!    undischarged attested third-party caveat; step 1 of two. Its `exp`
+//!    is the role's `intermediate_ttl_seconds` (`0` ⟹ no `exp`).
 //!
 //! MAC verification, the `op`/`aud`/`invite` gates, the holder-of-key
 //! PoP and the pending/approval lookup are the HTTP layer's job (they
@@ -136,11 +137,6 @@ pub struct AttestedTpc<'a> {
     pub location: &'a str,
 }
 
-/// The lifetime of the attested **intermediate** ([`mint_intermediate`]):
-/// the holder discharges it and finalizes immediately, so it is short —
-/// a window for one attestation round-trip, not a held credential.
-pub const INTERMEDIATE_TTL_SECONDS: u64 = 600;
-
 /// The non-expiring credential, re-minted from root at a successful
 /// exchange: `op=assume-role`, `aud`, the same `sub`/`cnf`, the
 /// `role` it was authorized for, the enrolled record's `rev_epoch` as
@@ -184,14 +180,21 @@ pub fn mint_credential(
     macaroon::mint(keyring, caveats)
 }
 
-/// Step 1 of exchange for an **attested** role: a short-lived
-/// `op=exchange-finalize` intermediate carrying the same identity/role as
-/// the eventual credential plus an `exp` and the undischarged attested
-/// third-party caveat. The holder discharges the TPC at the attestation
-/// authority and presents the bundle to `POST /v1/exchange-finalize`,
-/// which bakes the attested values into the final credential. A fresh
-/// chain from root (only the root holder can mint), not an attenuation of
-/// the ticket — mirrors [`mint_credential_ticket`] one level deeper.
+/// Step 1 of exchange for an **attested** role: an `op=exchange-finalize`
+/// intermediate carrying the same identity/role as the eventual credential
+/// plus the undischarged attested third-party caveat. The holder discharges
+/// the TPC at the attestation authority and presents the bundle to
+/// `POST /v1/exchange-finalize`, which bakes the attested values into the
+/// final credential. A fresh chain from root (only the root holder can
+/// mint), not an attenuation of the ticket — mirrors
+/// [`mint_credential_ticket`] one level deeper.
+///
+/// `exp` bounds how long the holder may discharge and finalize this
+/// intermediate, from the role's `[role.attestation].intermediate_ttl_seconds`.
+/// `None` (config `0`) stamps no `exp`: the intermediate never expires, so
+/// the holder keeps it and finalizes per-use for its lifetime. A no-`exp`
+/// intermediate verifies and clears cleanly at finalize — `exp` is a bound,
+/// not a required caveat.
 #[allow(clippy::too_many_arguments)]
 pub fn mint_intermediate(
     keyring: &Keyring,
@@ -200,21 +203,21 @@ pub fn mint_intermediate(
     cnf: &str,
     role: &str,
     rev_epoch: u64,
-    exp_unix: u64,
+    exp: Option<u64>,
     attested: AttestedTpc<'_>,
 ) -> Macaroon {
-    let base = macaroon::mint(
-        keyring,
-        vec![
-            Caveat::scalar(name::OP, op::EXCHANGE_FINALIZE),
-            Caveat::scalar(name::AUD, audience),
-            Caveat::scalar(name::SUB, sub),
-            Caveat::scalar(name::CNF, cnf),
-            Caveat::scalar(name::ROLE, role),
-            Caveat::scalar(name::EPOCH, rev_epoch.to_string()),
-            Caveat::scalar(name::EXP, exp_unix.to_string()),
-        ],
-    );
+    let mut caveats = vec![
+        Caveat::scalar(name::OP, op::EXCHANGE_FINALIZE),
+        Caveat::scalar(name::AUD, audience),
+        Caveat::scalar(name::SUB, sub),
+        Caveat::scalar(name::CNF, cnf),
+        Caveat::scalar(name::ROLE, role),
+        Caveat::scalar(name::EPOCH, rev_epoch.to_string()),
+    ];
+    if let Some(exp_unix) = exp {
+        caveats.push(Caveat::scalar(name::EXP, exp_unix.to_string()));
+    }
+    let base = macaroon::mint(keyring, caveats);
     // `r` is fresh per caveat, so the discharge binds to this intermediate
     // alone; the holder cannot recover it (it has neither `K_M-B` nor the
     // chain tag at the TPC position).
@@ -413,7 +416,7 @@ mod tests {
             &cnf(),
             "volume-ro",
             7,
-            1_700_000_000,
+            Some(1_700_000_000),
             AttestedTpc {
                 k_m_b: &K_M_B,
                 org_id: "org_demo",
@@ -474,7 +477,7 @@ mod tests {
                 &cnf(),
                 "volume-ro",
                 7,
-                1_700_000_000,
+                Some(1_700_000_000),
                 attested(),
             )
         };

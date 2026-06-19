@@ -53,6 +53,7 @@ policy_file = "attested-write.json"
 caveat = ["project", "sub"]
 [role.attestation]
 attested = ["project"]
+intermediate_ttl_seconds = 0
 "#;
 
 /// The shipped demo template: one policy substituting every namespace. The
@@ -116,9 +117,9 @@ fn far_future() -> u64 {
     (chrono::Utc::now().timestamp() as u64) + 365 * 24 * 3600
 }
 
-/// The short-lived `op=exchange-finalize` intermediate the client holds at
-/// step 1 for the `attested-write` role, carrying the undischarged
-/// attested TPC its role declares.
+/// The `op=exchange-finalize` intermediate the client holds at step 1 for
+/// the `attested-write` role, carrying the undischarged attested TPC its
+/// role declares.
 fn intermediate(k_m_b: &[u8; 32]) -> Macaroon {
     mint_intermediate(
         &Keyring::single(ROOT),
@@ -127,7 +128,7 @@ fn intermediate(k_m_b: &[u8; 32]) -> Macaroon {
         &pop::cnf_value(&SigningKey::from_bytes(&CLIENT_SEED)),
         "attested-write",
         0,
-        far_future(),
+        Some(far_future()),
         AttestedTpc {
             k_m_b,
             org_id: "demo",

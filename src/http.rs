@@ -894,7 +894,7 @@ async fn enroll(State(state): State<AppState>, headers: HeaderMap, body: Bytes) 
         &state.config.audience,
         &sub,
         &cnf,
-        now_unix.saturating_add(state.config.ticket_ttl_secs),
+        now_unix.saturating_add(state.config.ticket_ttl_seconds),
         &org_id,
         location,
     );
@@ -1160,6 +1160,20 @@ async fn enroll_exchange(
                 mode,
                 location,
             };
+            // The intermediate's `exp` comes from the role's configured
+            // `intermediate_ttl_seconds`: `0` (or, defensively, an
+            // attestation role with no ttl) ⟹ no `exp`, an intermediate the
+            // holder keeps and finalizes per-use for its lifetime;
+            // `n > 0` ⟹ an intermediate that expires `n` seconds from now.
+            let exp = match state
+                .config
+                .roles
+                .get(&role)
+                .and_then(|r| r.intermediate_ttl_seconds)
+            {
+                Some(0) | None => None,
+                Some(ttl) => Some(now_unix.saturating_add(ttl)),
+            };
             issuance::mint_intermediate(
                 &keyring,
                 &state.config.audience,
@@ -1167,7 +1181,7 @@ async fn enroll_exchange(
                 &cnf,
                 &role,
                 rev_epoch,
-                now_unix.saturating_add(issuance::INTERMEDIATE_TTL_SECONDS),
+                exp,
                 attested,
             )
         }
