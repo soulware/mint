@@ -96,8 +96,9 @@ enum Command {
 enum ClientCmd {
     /// Print this identity's `cnf` value + fingerprint.
     ///
-    /// The operator compares this out of band before `enroll approve`. The
-    /// identity is minted on first use, so this also creates it.
+    /// The operator compares this out of band against the fingerprint shown
+    /// at the `enroll approve` y|N confirmation prompt. The identity is minted
+    /// on first use, so this also creates it.
     Fingerprint,
     /// Attenuate the invite, enrol, and save the credential ticket.
     ///
