@@ -150,8 +150,8 @@ fn build_discharge(primary: &Macaroon) -> Macaroon {
 /// A primary carrying the **attested** TPC (the volume-attestation
 /// variant), built via the public issuance APIs. Same universal caveats
 /// as [`build_primary`]; the TPC's CID is sealed under `K_M-B` and
-/// carries an opaque `mode`.
-fn build_attested_primary(mode: &str) -> Macaroon {
+/// carries the `role` name, which also stamps the `role` caveat.
+fn build_attested_primary(role: &str) -> Macaroon {
     let ring = Keyring::single(ROOT);
     let cred = macaroon::mint(
         &ring,
@@ -163,10 +163,10 @@ fn build_attested_primary(mode: &str) -> Macaroon {
                 name::CNF,
                 pop::cnf_value(&SigningKey::from_bytes(&CLIENT_SEED)),
             ),
-            Caveat::scalar(name::ROLE, "volume-ro"),
+            Caveat::scalar(name::ROLE, role),
         ],
     );
-    let tpc_cv = tpc::build_caveat_attested(cred.tail(), &K_M_B, CLIENT_ID, ORG_ID, mode, AUTH_URL);
+    let tpc_cv = tpc::build_caveat_attested(cred.tail(), &K_M_B, CLIENT_ID, ORG_ID, role, AUTH_URL);
     cred.attenuate(tpc_cv)
 }
 
@@ -439,8 +439,8 @@ async fn verifies_attested_primary_and_coord_b_discharge() {
 }
 
 #[tokio::test]
-async fn rejects_attested_discharge_transplanted_across_modes() {
-    // The cross-mode transplant: the same client holds a volume-ro
+async fn rejects_attested_discharge_transplanted_across_roles() {
+    // The cross-role transplant: the same client holds a volume-ro
     // and a volume-rw credential. A discharge coord B mints for the
     // volume-ro caveat names that caveat's ticket (derived from its CID),
     // so it does not match the volume-rw credential's TPC and is rejected

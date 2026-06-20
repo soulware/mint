@@ -420,7 +420,7 @@ async fn open_store(cfg: &Config) -> Result<(Store, TigrisHandles), Box<dyn std:
     // the demo authority alike; a production mint has it provisioned
     // out-of-band by its attestation authority.
     let attest_demo = cfg.demo_attestation.as_ref().is_some_and(|d| d.enabled);
-    if cfg.roles.values().any(|r| r.attestation_mode.is_some()) || attest_demo {
+    if cfg.roles.values().any(|r| r.is_attested()) || attest_demo {
         store.init_k_m_b(&cfg.data_dir, demo_enabled)?;
     }
     Ok((

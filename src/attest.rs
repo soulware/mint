@@ -28,13 +28,13 @@
 //!
 //! Discharge construction: decrypt `cid` under `K_M-B`
 //! ([`tpc::decrypt_cid_attested`]) to recover `(r, client_id, org_id,
-//! mode)`, reject if `org_id` is not the org this role serves, then mint
+//! role)`, reject if `org_id` is not the org this role serves, then mint
 //! a discharge macaroon chain-MAC'd under `r`, carrying
 //! each requested `(name, value)` as a scalar caveat plus `exp` — the
 //! same caveat shape the attestation authority emits. A requested name
 //! that collides with a reserved control-caveat name is rejected: each
 //! authority emits only its own vocabulary, never the primary's control
-//! set. The CID's `mode` is recovered but not dispatched on — this
+//! set. The CID's `role` is recovered but not dispatched on — this
 //! issuer has a single predicate (the session gate).
 
 use axum::Router;
@@ -69,7 +69,7 @@ const DISCHARGE_EXP_SECONDS: u64 = 300;
 pub(crate) struct AttestRequest {
     /// Base64url of the credential's attested third-party-caveat `CID`.
     /// Decrypted under `K_M-B` to recover the discharge key `r` and the
-    /// bound `(client_id, org_id, mode)`.
+    /// bound `(client_id, org_id, role)`.
     pub(crate) cid: String,
     /// The `(name, value)` pairs the discharge is to attest — the names
     /// the role bakes at exchange and its policy template substitutes as

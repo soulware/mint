@@ -373,13 +373,6 @@ pub struct RawRole {
 /// The `[role.attestation]` subtable: a role's attested-caveat contract.
 #[derive(Debug, Deserialize)]
 pub struct RawRoleAttestation {
-    /// Opaque context sealed verbatim into the attested caveat's CID and
-    /// interpreted by the attestation authority alone. mint never
-    /// inspects it — it carries whatever the authority's vocabulary
-    /// needs. Defaults to the role name; set explicitly only when the
-    /// authority's mode name differs from the role name.
-    #[serde(default)]
-    pub mode: Option<String>,
     /// The names the attestation authority must attest at
     /// `exchange-finalize`; their discharged values are baked into the
     /// credential as ordinary MAC'd caveats (resolved by the template as
@@ -588,13 +581,6 @@ pub struct Role {
     /// and from the reserved control names. Sorted and de-duplicated at
     /// load; sealed into [`crate::seal::SealedRole`].
     pub holder: Vec<String>,
-    /// The role's opaque attestation `mode`, from `[role.attestation]`
-    /// (defaulting to the role name) — `None` when the role declares no
-    /// attestation. When `Some`, mint stamps an attested third-party
-    /// caveat onto the credential at issuance, carrying this string
-    /// verbatim for the attestation authority
-    /// (`docs/design-mint.md` § *Attestation contract*).
-    pub attestation_mode: Option<String>,
     /// The `op=exchange-finalize` intermediate's lifetime in seconds, from
     /// `[role.attestation].intermediate_ttl_seconds` — `Some` exactly when
     /// the role is attested (the intermediate only exists for attested
@@ -603,6 +589,17 @@ pub struct Role {
     /// expires after `n` seconds. `enroll_exchange` turns this into the
     /// intermediate's `exp`.
     pub intermediate_ttl_seconds: Option<u64>,
+}
+
+impl Role {
+    /// `true` when the role declares `[role.attestation]`: its credential
+    /// carries an attested third-party caveat keyed by the role name, so
+    /// exchange is two-step (intermediate → discharge → finalize). The
+    /// intermediate only exists for attested roles, so its lifetime field
+    /// is the canonical marker.
+    pub fn is_attested(&self) -> bool {
+        self.intermediate_ttl_seconds.is_some()
+    }
 }
 
 impl Config {
@@ -670,10 +667,9 @@ impl Config {
                 });
             }
             let caveat = canonical_field_set(r.template.caveat);
-            let (attestation_mode, attested, intermediate_ttl_seconds) = match r.attestation {
-                None => (None, Vec::new(), None),
+            let (attested, intermediate_ttl_seconds) = match r.attestation {
+                None => (Vec::new(), None),
                 Some(a) => (
-                    Some(a.mode.unwrap_or_else(|| r.name.clone())),
                     canonical_field_set(a.attested),
                     Some(a.intermediate_ttl_seconds),
                 ),
@@ -732,7 +728,6 @@ impl Config {
                 attested,
                 caveat,
                 holder,
-                attestation_mode,
                 intermediate_ttl_seconds,
             };
             if roles.insert(r.name.clone(), role).is_some() {
@@ -1014,7 +1009,6 @@ max_ttl_seconds = 100
 default_ttl_seconds = 100
 policy_file = "volume-ro.json"
 [role.attestation]
-mode = "custom-ancestor"
 intermediate_ttl_seconds = 600
 [[role]]
 name = "coord-base"
@@ -1025,7 +1019,7 @@ policy_file = "coord-base.json"
 "#;
 
     #[test]
-    fn attestation_mode_and_location_resolve_per_role() {
+    fn attestation_marker_and_location_resolve_per_role() {
         let c = parse_for_test(
             ATTESTATION_SAMPLE,
             &[
@@ -1039,18 +1033,11 @@ policy_file = "coord-base.json"
             c.attestation_location.as_deref(),
             Some("https://coord-b.example/v1/discharge")
         );
-        // A bare [role.attestation] defaults the mode to the role name;
-        // an explicit mode is carried verbatim; a role with no
-        // [role.attestation] carries none.
-        assert_eq!(
-            c.roles["volume-rw"].attestation_mode.as_deref(),
-            Some("volume-rw")
-        );
-        assert_eq!(
-            c.roles["volume-ro"].attestation_mode.as_deref(),
-            Some("custom-ancestor")
-        );
-        assert_eq!(c.roles["coord-base"].attestation_mode, None);
+        // A [role.attestation] subtable marks the role attested (its TPC is
+        // keyed by the role name); a role without one is not.
+        assert!(c.roles["volume-rw"].is_attested());
+        assert!(c.roles["volume-ro"].is_attested());
+        assert!(!c.roles["coord-base"].is_attested());
         // The intermediate lifetime resolves per attested role: `0` ⟹ a
         // no-`exp` intermediate the holder finalizes per-use; `n > 0` ⟹ one
         // that expires. A role with no [role.attestation] carries none.

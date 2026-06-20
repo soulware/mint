@@ -1157,13 +1157,13 @@ async fn enroll_exchange(
     // the bundle to `POST /v1/exchange-finalize`, which bakes the attested
     // values into the credential (step 2). Every other role gets the
     // uniform key-bound credential directly, with no third-party caveat.
-    let credential = match state
+    let attested_role = state
         .config
         .roles
         .get(&role)
-        .and_then(|r| r.attestation_mode.as_deref())
-    {
-        None => issuance::mint_credential(
+        .is_some_and(|r| r.is_attested());
+    let credential = if !attested_role {
+        issuance::mint_credential(
             &keyring,
             &state.config.audience,
             &sub,
@@ -1171,57 +1171,56 @@ async fn enroll_exchange(
             &role,
             rev_epoch,
             &baked,
-        ),
-        Some(mode) => {
-            // Config load rejects an attestation role without a location,
-            // and bootstrap loads K_M-B whenever such a role exists, so a
-            // gap here is an internal invariant breach, not a client
-            // fault — fail closed rather than mint an undischargeable
-            // intermediate.
-            let (Some(k_m_b), Some(location)) = (
-                state.store.k_m_b(),
-                state.config.attestation_location.as_deref(),
-            ) else {
-                tracing::error!(role = %role, "attestation role missing K_M-B or attestation_location");
-                audit("denied:state_error", &caveats, &role);
-                return respond(
-                    &request_id,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    json!({"error": "service unavailable"}),
-                );
-            };
-            let attested = issuance::AttestedTpc {
-                k_m_b,
-                org_id: state.store.org_id().unwrap_or("demo"),
-                mode,
-                location,
-            };
-            // The intermediate's `exp` comes from the role's configured
-            // `intermediate_ttl_seconds`: `0` (or, defensively, an
-            // attestation role with no ttl) ⟹ no `exp`, an intermediate the
-            // holder keeps and finalizes per-use for its lifetime;
-            // `n > 0` ⟹ an intermediate that expires `n` seconds from now.
-            let exp = match state
-                .config
-                .roles
-                .get(&role)
-                .and_then(|r| r.intermediate_ttl_seconds)
-            {
-                Some(0) | None => None,
-                Some(ttl) => Some(now_unix.saturating_add(ttl)),
-            };
-            issuance::mint_intermediate(
-                &keyring,
-                &state.config.audience,
-                &sub,
-                &cnf,
-                &role,
-                rev_epoch,
-                exp,
-                &baked,
-                attested,
-            )
-        }
+        )
+    } else {
+        // Config load rejects an attestation role without a location,
+        // and bootstrap loads K_M-B whenever such a role exists, so a
+        // gap here is an internal invariant breach, not a client
+        // fault — fail closed rather than mint an undischargeable
+        // intermediate.
+        let (Some(k_m_b), Some(location)) = (
+            state.store.k_m_b(),
+            state.config.attestation_location.as_deref(),
+        ) else {
+            tracing::error!(role = %role, "attestation role missing K_M-B or attestation_location");
+            audit("denied:state_error", &caveats, &role);
+            return respond(
+                &request_id,
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({"error": "service unavailable"}),
+            );
+        };
+        let attested = issuance::AttestedTpc {
+            k_m_b,
+            org_id: state.store.org_id().unwrap_or("demo"),
+            role: &role,
+            location,
+        };
+        // The intermediate's `exp` comes from the role's configured
+        // `intermediate_ttl_seconds`: `0` (or, defensively, an
+        // attestation role with no ttl) ⟹ no `exp`, an intermediate the
+        // holder keeps and finalizes per-use for its lifetime;
+        // `n > 0` ⟹ an intermediate that expires `n` seconds from now.
+        let exp = match state
+            .config
+            .roles
+            .get(&role)
+            .and_then(|r| r.intermediate_ttl_seconds)
+        {
+            Some(0) | None => None,
+            Some(ttl) => Some(now_unix.saturating_add(ttl)),
+        };
+        issuance::mint_intermediate(
+            &keyring,
+            &state.config.audience,
+            &sub,
+            &cnf,
+            &role,
+            rev_epoch,
+            exp,
+            &baked,
+            attested,
+        )
     };
 
     // The enrolled-registry entry is not consumed: the ticket is
