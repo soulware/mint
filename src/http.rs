@@ -84,7 +84,6 @@ async fn readyz(State(state): State<AppState>) -> Response {
 #[derive(Deserialize)]
 struct AssumeRoleBody {
     role: String,
-    ttl_seconds: Option<u64>,
 }
 
 /// `/v1/enroll-exchange` body — `{ts, role}`. `ts` is handled by the PoP
@@ -419,7 +418,7 @@ async fn assume_role(State(state): State<AppState>, headers: HeaderMap, body: By
     // --- Seal gate: the role-rendering plane is closed while dormant
     // (no canonical seal at startup). The sealed surface — not the live
     // config — is the authority for audience, the role's required
-    // caveats / TTL bounds, and the policy bytes. ---
+    // caveats / `ttl_seconds`, and the policy bytes. ---
     let seal = state.seal.load();
     let surface = match seal.as_ref() {
         SealState::Serving(s) => s,
@@ -536,8 +535,9 @@ async fn assume_role(State(state): State<AppState>, headers: HeaderMap, body: By
     }
 
     // --- Request body (the exact bytes the PoP already covered). It
-    // carries only the request parameters `role`/`ttl_seconds`; no scoping
-    // value rides the body — scoping is attested by the discharge. ---
+    // carries only the request parameter `role`; no scoping value rides the
+    // body — scoping is attested by the discharge, and the lifetime is the
+    // role's sealed `ttl_seconds` (clamped to the macaroon's `exp`). ---
     let Ok(req) = serde_json::from_slice::<AssumeRoleBody>(&body) else {
         audit(entry("denied:bad_request", "", None, None));
         return respond(
@@ -547,22 +547,7 @@ async fn assume_role(State(state): State<AppState>, headers: HeaderMap, body: By
         );
     };
 
-    let requested_ttl = match req.ttl_seconds {
-        Some(t) => t,
-        None => match surface.role(&req.role) {
-            Some(r) => r.default_ttl_seconds,
-            None => {
-                audit(entry("denied:unknown_role", &req.role, None, None));
-                return respond(
-                    &request_id,
-                    StatusCode::BAD_REQUEST,
-                    json!({"error": "bad request"}),
-                );
-            }
-        },
-    };
-
-    let granted = match role::authorize(surface, &caveats, &req.role, requested_ttl, now_unix) {
+    let granted = match role::authorize(surface, &caveats, &req.role, now_unix) {
         Ok(g) => g,
         Err(d) => {
             audit(entry(
@@ -1160,19 +1145,9 @@ async fn enroll_exchange(
             role: &role,
             location,
         };
-        // The intermediate's `exp` comes from the role's configured
-        // `intermediate_ttl_seconds`: `0` ⟹ no `exp`, an intermediate the
-        // holder keeps and finalizes per-use for its lifetime; `n > 0` ⟹ an
-        // intermediate that expires `n` seconds from now.
-        let exp = match state
-            .config
-            .roles
-            .get(&role)
-            .and_then(|r| r.intermediate_ttl_seconds)
-        {
-            Some(0) | None => None,
-            Some(ttl) => Some(now_unix.saturating_add(ttl)),
-        };
+        // The intermediate carries no `exp`: it is durable, held and
+        // finalized per-use by the holder. Its discharge still binds to the
+        // current `K_M-B`, so a key rotation retires outstanding ones.
         issuance::mint_intermediate(
             &keyring,
             &state.config.audience,
@@ -1180,7 +1155,6 @@ async fn enroll_exchange(
             &cnf,
             &role,
             rev_epoch,
-            exp,
             attested,
         )
     };
@@ -1381,7 +1355,6 @@ fn denied_tag(d: &Denied) -> &'static str {
         Denied::MissingRequiredCaveat(_) => "missing_required_caveat",
         Denied::UnsatisfiableCaveat(_) => "unsatisfiable_caveat",
         Denied::Expired => "expired",
-        Denied::TtlTooShort => "ttl_too_short",
     }
 }
 

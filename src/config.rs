@@ -25,8 +25,8 @@ pub enum ConfigError {
     Toml(#[from] toml::de::Error),
     #[error("duplicate role name: {0}")]
     DuplicateRole(String),
-    #[error("role {role}: {field} must be > 0 and min <= default <= max")]
-    BadTtlBounds { role: String, field: String },
+    #[error("role {role}: ttl_seconds must be > 0")]
+    ZeroTtl { role: String },
     #[error("ticket_ttl_seconds must be > 0")]
     BadTicketTtl,
     #[error(
@@ -67,16 +67,6 @@ pub enum ConfigError {
          [attestation].location is configured to discharge it"
     )]
     AttestationWithoutLocation { role: String },
-    #[error(
-        "role {role}: is attested (binds a non-reserved caveat) but has no \
-         intermediate_ttl_seconds — the intermediate's lifetime must be explicit"
-    )]
-    MissingIntermediateTtl { role: String },
-    #[error(
-        "role {role}: sets intermediate_ttl_seconds but is issuer-only (binds no \
-         non-reserved caveat), so it has no intermediate to bound"
-    )]
-    UnexpectedIntermediateTtl { role: String },
     #[error("role {role}: policy template is not valid JSON: {source}")]
     PolicyNotJson {
         role: String,
@@ -323,9 +313,7 @@ fn non_empty_env(key: &str) -> Option<String> {
 #[derive(Debug, Deserialize)]
 pub struct RawRole {
     pub name: String,
-    pub min_ttl_seconds: u64,
-    pub max_ttl_seconds: u64,
-    pub default_ttl_seconds: u64,
+    pub ttl_seconds: u64,
     /// Filename of the IAM-policy JSON template (see
     /// [`crate::template`]), resolved against `roles_dir`. Optional;
     /// defaults to `<name>.json`. Whether explicit or derived it must
@@ -333,25 +321,6 @@ pub struct RawRole {
     /// (so a role `name` with a path separator is rejected too).
     #[serde(default)]
     pub policy_file: Option<String>,
-    /// Lifetime, in seconds, of the `op=exchange-finalize` intermediate
-    /// handed back at `enroll-exchange` (step 1). It stamps the
-    /// intermediate's `exp`, bounding how long the holder may discharge and
-    /// finalize it. **`0` ⟹ no `exp`**: the intermediate never expires, so
-    /// the holder keeps it and finalizes per-use for its lifetime (TOML has
-    /// no nil, so `0` is the no-expiry value).
-    ///
-    /// Required on (and only on) an **attested** role — one whose policy
-    /// template binds a non-reserved `{{caveat.X}}`, so its credential
-    /// carries an attested third-party caveat. An issuer-only role (only
-    /// reserved caveats) has no intermediate and must omit it. The
-    /// intermediate's lifetime is always an explicit, visible choice.
-    ///
-    /// A no-`exp` intermediate is still bounded by the attestation key: its
-    /// TPC binds to the current `K_M-B`, so a `K_M-B` rotation makes
-    /// outstanding intermediates undischargeable and the holder re-enrolls
-    /// to mint a fresh one.
-    #[serde(default)]
-    pub intermediate_ttl_seconds: Option<u64>,
 }
 
 /// Resolved listener transport — a per-deployment-shape choice, not a
@@ -477,8 +446,8 @@ pub struct Config {
     /// and the admin plane fail closed.
     pub auth_location: Option<String>,
     /// The discharge URL for the attested third-party caveat — `None`
-    /// if the config omits `attestation_location`. A role that declares
-    /// `[role.attestation]` without it is rejected at load.
+    /// if the config omits `attestation_location`. An attested role (one
+    /// binding a non-reserved caveat) without it is rejected at load.
     pub attestation_location: Option<String>,
     pub roles: BTreeMap<String, Role>,
 }
@@ -486,9 +455,7 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Role {
     pub name: String,
-    pub min_ttl_seconds: u64,
-    pub max_ttl_seconds: u64,
-    pub default_ttl_seconds: u64,
+    pub ttl_seconds: u64,
     /// The resolved source of [`policy`](Role::policy):
     /// `<roles_dir>/<policy_file>`, or `<roles_dir>/<name>.json` when no
     /// explicit `policy_file` was set. Retained for diagnostics
@@ -509,14 +476,6 @@ pub struct Role {
     /// [`crate::seal::SealedRole`], and enforced at request time before
     /// render (every name must resolve to a MAC'd value).
     pub caveat: Vec<String>,
-    /// The `op=exchange-finalize` intermediate's lifetime in seconds, from
-    /// the role's top-level `intermediate_ttl_seconds` — `Some` exactly when
-    /// the role is attested (the intermediate only exists for attested
-    /// roles), `None` otherwise. `Some(0)` ⟹ the intermediate carries no
-    /// `exp` and is held for the holder's lifetime; `Some(n>0)` ⟹ it
-    /// expires after `n` seconds. `enroll_exchange` turns this into the
-    /// intermediate's `exp`.
-    pub intermediate_ttl_seconds: Option<u64>,
 }
 
 impl Role {
@@ -572,13 +531,9 @@ impl Config {
         };
         let mut roles = BTreeMap::new();
         for r in raw.roles {
-            if r.min_ttl_seconds == 0
-                || r.min_ttl_seconds > r.default_ttl_seconds
-                || r.default_ttl_seconds > r.max_ttl_seconds
-            {
-                return Err(ConfigError::BadTtlBounds {
+            if r.ttl_seconds == 0 {
+                return Err(ConfigError::ZeroTtl {
                     role: r.name.clone(),
-                    field: "ttl_seconds".into(),
                 });
             }
             let (policy_path, policy) = match r.policy_file {
@@ -598,42 +553,22 @@ impl Config {
                 .filter(|n| !crate::caveat::name::RESERVED.contains(&n.as_str()))
                 .cloned()
                 .collect();
-            // An attested role (one binding a non-reserved caveat) needs both
-            // an authority to discharge its TPC and an explicit intermediate
-            // lifetime; an issuer-only role has neither. Either mismatch is a
-            // silent dead-credential trap, so fail closed at load.
-            let intermediate_ttl_seconds = if attested.is_empty() {
-                if r.intermediate_ttl_seconds.is_some() {
-                    return Err(ConfigError::UnexpectedIntermediateTtl {
-                        role: r.name.clone(),
-                    });
-                }
-                None
-            } else {
-                if attestation_location.is_none() {
-                    return Err(ConfigError::AttestationWithoutLocation {
-                        role: r.name.clone(),
-                    });
-                }
-                match r.intermediate_ttl_seconds {
-                    Some(ttl) => Some(ttl),
-                    None => {
-                        return Err(ConfigError::MissingIntermediateTtl {
-                            role: r.name.clone(),
-                        });
-                    }
-                }
-            };
+            // An attested role (one binding a non-reserved caveat) needs an
+            // authority to discharge its TPC; an issuer-only role does not. A
+            // missing authority is a silent dead-credential trap, so fail
+            // closed at load.
+            if !attested.is_empty() && attestation_location.is_none() {
+                return Err(ConfigError::AttestationWithoutLocation {
+                    role: r.name.clone(),
+                });
+            }
             let role = Role {
                 name: r.name.clone(),
-                min_ttl_seconds: r.min_ttl_seconds,
-                max_ttl_seconds: r.max_ttl_seconds,
-                default_ttl_seconds: r.default_ttl_seconds,
+                ttl_seconds: r.ttl_seconds,
                 policy_path,
                 policy,
                 attested,
                 caveat,
-                intermediate_ttl_seconds,
             };
             if roles.insert(r.name.clone(), role).is_some() {
                 return Err(ConfigError::DuplicateRole(r.name));
@@ -865,9 +800,7 @@ bucket = "demo-bucket"
 
 [[role]]
 name = "volume-ro"
-min_ttl_seconds = 60
-max_ttl_seconds = 2592000
-default_ttl_seconds = 2592000
+ttl_seconds = 2592000
 policy_file = "volume-ro.json"
 "#;
 
@@ -887,23 +820,15 @@ bucket = "demo-bucket"
 location = "https://coord-b.example/v1/discharge"
 [[role]]
 name = "volume-rw"
-min_ttl_seconds = 60
-max_ttl_seconds = 100
-default_ttl_seconds = 100
+ttl_seconds = 100
 policy_file = "volume-rw.json"
-intermediate_ttl_seconds = 0
 [[role]]
 name = "volume-ro"
-min_ttl_seconds = 60
-max_ttl_seconds = 100
-default_ttl_seconds = 100
+ttl_seconds = 100
 policy_file = "volume-ro.json"
-intermediate_ttl_seconds = 600
 [[role]]
 name = "coord-base"
-min_ttl_seconds = 60
-max_ttl_seconds = 100
-default_ttl_seconds = 100
+ttl_seconds = 100
 policy_file = "coord-base.json"
 "#;
 
@@ -932,23 +857,6 @@ policy_file = "coord-base.json"
         assert!(c.roles["volume-ro"].is_attested());
         assert!(!c.roles["coord-base"].is_attested());
         assert!(c.roles["coord-base"].attested.is_empty());
-        // The intermediate lifetime resolves per attested role: `0` ⟹ a
-        // no-`exp` intermediate the holder finalizes per-use; `n > 0` ⟹ one
-        // that expires. An issuer-only role carries none.
-        assert_eq!(c.roles["volume-rw"].intermediate_ttl_seconds, Some(0));
-        assert_eq!(c.roles["volume-ro"].intermediate_ttl_seconds, Some(600));
-        assert_eq!(c.roles["coord-base"].intermediate_ttl_seconds, None);
-    }
-
-    #[test]
-    fn attested_role_without_intermediate_ttl_is_rejected_at_load() {
-        // An attested role's intermediate lifetime must be explicit; omitting
-        // it is a load error, not a silent default.
-        let toml = ATTESTATION_SAMPLE.replace("intermediate_ttl_seconds = 0\n", "");
-        assert!(matches!(
-            parse_for_test(&toml, &attestation_sample_policies()),
-            Err(ConfigError::MissingIntermediateTtl { role }) if role == "volume-rw"
-        ));
     }
 
     #[test]
@@ -965,20 +873,6 @@ policy_file = "coord-base.json"
         ));
     }
 
-    #[test]
-    fn issuer_only_role_with_intermediate_ttl_is_rejected() {
-        // `coord-base` is issuer-only (binds only `sub`); an intermediate
-        // lifetime is meaningless there and rejected at load.
-        let toml = ATTESTATION_SAMPLE.replace(
-            "policy_file = \"coord-base.json\"\n",
-            "policy_file = \"coord-base.json\"\nintermediate_ttl_seconds = 300\n",
-        );
-        assert!(matches!(
-            parse_for_test(&toml, &attestation_sample_policies()),
-            Err(ConfigError::UnexpectedIntermediateTtl { role }) if role == "coord-base"
-        ));
-    }
-
     /// A minimal single-role config with no [attestation] location, for the
     /// issuer-only and seal-authoring surface checks (the policy body is
     /// supplied per-test).
@@ -988,15 +882,13 @@ audience = "mint"
 bucket = "state-bucket"
 [[role]]
 name = "r"
-min_ttl_seconds = 60
-max_ttl_seconds = 100
-default_ttl_seconds = 100
+ttl_seconds = 100
 policy_file = "r.json"
 "#;
 
-    /// A single-role config that supplies an [attestation] location and an
-    /// intermediate ttl, so a policy binding a non-reserved (attested) caveat
-    /// loads cleanly. The policy body is supplied per-test.
+    /// A single-role config that supplies an [attestation] location, so a
+    /// policy binding a non-reserved (attested) caveat loads cleanly. The
+    /// policy body is supplied per-test.
     const ATTESTED_ROLE_SAMPLE: &str = r#"
 audience = "mint"
 [store]
@@ -1005,11 +897,8 @@ bucket = "state-bucket"
 location = "https://a.example/v1/discharge"
 [[role]]
 name = "r"
-min_ttl_seconds = 60
-max_ttl_seconds = 100
-default_ttl_seconds = 100
+ttl_seconds = 100
 policy_file = "r.json"
-intermediate_ttl_seconds = 0
 "#;
 
     #[test]
@@ -1064,7 +953,7 @@ intermediate_ttl_seconds = 0
     #[test]
     fn issuer_only_template_needs_no_attestation() {
         // A template binding only reserved names is issuer-only: no attested
-        // caveat, no intermediate, and it loads with no authority configured.
+        // caveat, and it loads with no authority configured.
         let cfg = parse_for_test(
             SINGLE_ROLE_SAMPLE,
             &[("r.json", r#"{"r":"literal-bucket/{{caveat.sub}}/*"}"#)],
@@ -1074,7 +963,6 @@ intermediate_ttl_seconds = 0
         assert!(!cfg.roles["r"].is_attested());
         assert!(cfg.roles["r"].attested.is_empty());
         assert_eq!(cfg.roles["r"].caveat, vec!["sub".to_string()]);
-        assert_eq!(cfg.roles["r"].intermediate_ttl_seconds, None);
     }
 
     #[test]
@@ -1151,11 +1039,11 @@ intermediate_ttl_seconds = 0
     }
 
     #[test]
-    fn rejects_inverted_ttl_bounds() {
-        let bad = SAMPLE.replace("max_ttl_seconds = 2592000", "max_ttl_seconds = 10");
+    fn rejects_zero_role_ttl() {
+        let bad = SAMPLE.replace("ttl_seconds = 2592000", "ttl_seconds = 0");
         assert!(matches!(
             parse_for_test(&bad, &[("volume-ro.json", "{}")]),
-            Err(ConfigError::BadTtlBounds { .. })
+            Err(ConfigError::ZeroTtl { role }) if role == "volume-ro"
         ));
     }
 

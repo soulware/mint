@@ -3,7 +3,7 @@
 //! time (`docs/design-mint-template-seal.md`).
 //!
 //! The seal MACs the substrate that drives `/v1/assume-role`'s policy
-//! output: each role's TTL bounds and the BLAKE3 hash of its policy
+//! output: each role's `ttl_seconds` and the BLAKE3 hash of its policy
 //! template's content. A bucket-credential
 //! holder cannot forge a seal — only a process holding the macaroon
 //! keyring can produce a valid MAC, the same trust anchor that signs
@@ -38,7 +38,7 @@ use crate::sealed_cache::{SealState, ServedSurface};
 const SEAL_DOMAIN: &[u8] = b"mint-templates-seal-v1";
 
 /// Sealed view of one role: every field of the `[[role]]` block that
-/// bears on what mint will render or grant — TTL bounds and the policy
+/// bears on what mint will render or grant — `ttl_seconds` and the policy
 /// template's content hash. The only role-block
 /// field deliberately left unsealed is `policy_file` (the filename):
 /// what matters is the bytes it currently contains — hashed into
@@ -60,9 +60,7 @@ pub struct SealedRole {
     /// a host enforces exactly the caveat requirement that was authored,
     /// never a drifted local one.
     pub caveat: Vec<String>,
-    pub default_ttl_seconds: u64,
-    pub max_ttl_seconds: u64,
-    pub min_ttl_seconds: u64,
+    pub ttl_seconds: u64,
     /// BLAKE3 of the role's policy template file content, hex-encoded.
     pub policy_blake3: String,
     /// The attested `caveat.*` names — the non-reserved subset of
@@ -123,26 +121,17 @@ impl Seal {
             // how an authority-bearing field silently escapes the seal.
             let crate::config::Role {
                 name: _,
-                min_ttl_seconds,
-                max_ttl_seconds,
-                default_ttl_seconds,
+                ttl_seconds,
                 policy_path: _, // location, not authority — bytes hashed below
                 policy,
                 attested,
                 caveat,
-                // The intermediate's `exp` lifetime is read from live config
-                // at enroll-exchange and stamped onto the intermediate, not
-                // the assume-role credential the seal pins — outside the
-                // sealed TTL bounds (which govern assume-role rendering).
-                intermediate_ttl_seconds: _,
             } = role;
             roles.insert(
                 name.clone(),
                 SealedRole {
                     caveat: caveat.clone(),
-                    default_ttl_seconds: *default_ttl_seconds,
-                    max_ttl_seconds: *max_ttl_seconds,
-                    min_ttl_seconds: *min_ttl_seconds,
+                    ttl_seconds: *ttl_seconds,
                     policy_blake3: hash_hex(policy.as_bytes()),
                     attested: attested.clone(),
                 },
@@ -179,7 +168,7 @@ impl Seal {
     }
 
     /// Two seals are *semantically* equal when they pin the same
-    /// intent — audience + per-role TTL bounds and policy hash.
+    /// intent — audience + per-role `ttl_seconds` and policy hash.
     /// `sealed_at`, `kid`, and `mac` are explicitly
     /// ignored so two hosts signing identical templates produce
     /// reconciliation-equal seals.
@@ -226,18 +215,10 @@ impl Seal {
                 diffs.push(format!("role {name}: not in seal"));
                 continue;
             };
-            if sealed.min_ttl_seconds != role.min_ttl_seconds
-                || sealed.max_ttl_seconds != role.max_ttl_seconds
-                || sealed.default_ttl_seconds != role.default_ttl_seconds
-            {
+            if sealed.ttl_seconds != role.ttl_seconds {
                 diffs.push(format!(
-                    "role {name}: TTL bounds sealed as ({}, {}, {}), local has ({}, {}, {})",
-                    sealed.min_ttl_seconds,
-                    sealed.default_ttl_seconds,
-                    sealed.max_ttl_seconds,
-                    role.min_ttl_seconds,
-                    role.default_ttl_seconds,
-                    role.max_ttl_seconds,
+                    "role {name}: ttl_seconds sealed as {}, local has {}",
+                    sealed.ttl_seconds, role.ttl_seconds,
                 ));
             }
             let local_hash = hash_hex(role.policy.as_bytes());
@@ -430,9 +411,7 @@ bucket = "demo-bucket"
 
 [[role]]
 name = "volume-ro"
-min_ttl_seconds = 60
-max_ttl_seconds = 2592000
-default_ttl_seconds = 2592000
+ttl_seconds = 2592000
 policy_file = "volume-ro.json"
 "#;
 
@@ -530,7 +509,7 @@ policy_file = "volume-ro.json"
         // Tampering with a sealed role field invalidates the MAC.
         let kr = Keyring::single([7u8; 32]);
         let mut seal = Seal::build_from_config(&config(), &kr, "t");
-        seal.roles.get_mut("volume-ro").unwrap().max_ttl_seconds += 1;
+        seal.roles.get_mut("volume-ro").unwrap().ttl_seconds += 1;
         assert!(matches!(seal.verify(&kr), Err(SealError::BadMac)));
     }
 
@@ -565,7 +544,7 @@ policy_file = "volume-ro.json"
 
     #[test]
     fn semantic_equality_diverges_on_intent() {
-        // A change to any sealed field — TTL bounds here — breaks
+        // A change to any sealed field — `ttl_seconds` here — breaks
         // semantic equality, so the second host's startup
         // recognises conflicting intent and publishes its own seal
         // (the operator-driven "rolling restart updates the seal"
@@ -573,7 +552,7 @@ policy_file = "volume-ro.json"
         let kr = Keyring::single([7u8; 32]);
         let a = Seal::build_from_config(&config(), &kr, "t1");
         let mut b = a.clone();
-        b.roles.get_mut("volume-ro").unwrap().max_ttl_seconds += 1;
+        b.roles.get_mut("volume-ro").unwrap().ttl_seconds += 1;
         assert!(!a.semantically_equal(&b));
     }
 
@@ -609,9 +588,7 @@ audience = "mint"
 bucket = "demo-bucket"
 [[role]]
 name = "coord-rw"
-min_ttl_seconds = 60
-max_ttl_seconds = 3600
-default_ttl_seconds = 3600
+ttl_seconds = 3600
 policy_file = "coord-rw.json"
 "#;
 
@@ -657,11 +634,8 @@ bucket = "demo-bucket"
 location = "https://a.example/v1/discharge"
 [[role]]
 name = "coord-rw"
-min_ttl_seconds = 60
-max_ttl_seconds = 3600
-default_ttl_seconds = 3600
+ttl_seconds = 3600
 policy_file = "coord-rw.json"
-intermediate_ttl_seconds = 0
 "#;
         let cfg = parse_for_test(
             toml,

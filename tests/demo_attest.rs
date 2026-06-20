@@ -42,11 +42,8 @@ bucket = "mint-demo"
 location = "https://attest.elide.internal/v1/discharge"
 [[role]]
 name = "attested-write"
-min_ttl_seconds = 60
-max_ttl_seconds = 900
-default_ttl_seconds = 300
+ttl_seconds = 300
 policy_file = "attested-write.json"
-intermediate_ttl_seconds = 0
 "#;
 
 /// The shipped demo template: a literal bucket/prefix plus the caveat and
@@ -121,7 +118,6 @@ fn intermediate(k_m_b: &[u8; 32]) -> Macaroon {
         &pop::cnf_value(&SigningKey::from_bytes(&CLIENT_SEED)),
         "attested-write",
         0,
-        Some(far_future()),
         AttestedTpc {
             k_m_b,
             org_id: "demo",
@@ -246,7 +242,7 @@ async fn demo_attest_loop_bakes_then_renders() {
 
     // assume-role with the bare credential — no discharge in the bundle.
     let ts = chrono::Utc::now().timestamp() as u64;
-    let body = format!("{{\"ts\":{ts},\"role\":\"attested-write\",\"ttl_seconds\":600}}");
+    let body = format!("{{\"ts\":{ts},\"role\":\"attested-write\"}}");
     let sig = pop::client_signature(
         &SigningKey::from_bytes(&CLIENT_SEED),
         cred.tail(),

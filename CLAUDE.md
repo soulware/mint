@@ -78,7 +78,7 @@ Client side (the client's half; identity under `./mint_client`):
 mint client fingerprint                         # mints identity on first use; operator compares this during approve
 mint client enroll  --id <sub> <invite>         # attenuates the invite with sub+cnf
 mint client exchange [--caveat N=V] <role>      # exits 2 until approved; --caveat proposes attested values (vouched at finalize)
-mint client assume-role [--req '{...}'] <role>  # the credential is a bare primary
+mint client assume-role [--ttl N] <role>        # the credential is a bare primary; --ttl bounds via exp, never extends
 ```
 
 The **hermetic** shape (no cloud) is the `mint-e2e` harness bin: the same `serve::run` loop over
@@ -136,18 +136,17 @@ credential is a bare primary.
 **Provenance is derived, not declared (`docs/design-always-attest.md`).** A `{{caveat.X}}` value is
 one of two things: **issuer-stamped** (a reserved name like `sub`, set by mint) or **attested** (any
 other name — the caller proposes it and an authority vouches it). A role binding **any** non-reserved
-caveat is *attested*; a role binding only reserved caveats is *issuer-only*. There is no separate
-holder-supplied source and nothing to declare per caveat — the manifest, attested set, and issuer set
-are all derived from the template (`config::from_raw` via `template::template_surface`, partitioned by
-`caveat::name::RESERVED`).
+caveat is *attested*; a role binding only reserved caveats is *issuer-only*. The manifest, attested
+set, and issuer set are all derived from the template (`config::from_raw` via
+`template::template_surface`, partitioned by `caveat::name::RESERVED`).
 
 **Attestation is point-in-time, at exchange.** An attested role exchanges in two steps:
 `POST /v1/enroll-exchange` returns an `op=exchange-finalize` *intermediate* carrying an undischarged
 attested third-party caveat (no values); the client proposes every non-reserved value to the
 attestation authority, discharges the TPC, and `POST /v1/exchange-finalize` **bakes** the vouched
-values into the credential as ordinary MAC'd caveats. The intermediate's lifetime is the role's
-required top-level `intermediate_ttl_seconds`: `0` ⟹ no `exp`, so the holder keeps it and finalizes
-per-use (e.g. a coordinator minting a credential per volume); `n > 0` ⟹ it expires after `n` seconds.
+values into the credential as ordinary MAC'd caveats. The intermediate carries no `exp` — it is
+durable, so the holder keeps it and finalizes per-use (e.g. a coordinator minting a credential per
+volume).
 Baked values are indistinguishable from the issuer-stamped `sub` and render as `{{caveat.X}}` (there is
 no `{{attested.X}}` namespace). An issuer-only role exchanges in one step with no authority. The demo
 attestation authority is **echo-only** — real plumbing (`K_M-B`, an `r`-bound discharge), but the
@@ -170,7 +169,7 @@ the value from `(sub, role)` (the attested caveat's CID seals the role name for 
   / `Store::open_in_memory` (tests/harness only). Idempotent same-`(sub,pub)`, conflict on a
   different key, GC of stale pending, consume-on-exchange.
 - `seal` / `sealed_cache` — the **template seal**: an operator-signed manifest pinning each role's
-  TTL bounds + BLAKE3 of its policy template, MAC'd under the keyring (a bucket-credential holder
+  `ttl_seconds` + BLAKE3 of its policy template, MAC'd under the keyring (a bucket-credential holder
   cannot forge one). Authored by `POST /v1/admin/seal`, served from an immutable in-memory
   `TemplateSet` — the request path never re-reads disk. `SealState` is `Serving` or `Dormant`,
   held in an `ArcSwap` so `mint seal` swaps the served surface live, no restart.

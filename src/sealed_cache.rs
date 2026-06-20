@@ -89,7 +89,7 @@ pub fn policies_from_config(config: &Config) -> TemplateSet {
 #[derive(Debug, Clone)]
 pub struct ServedSurface {
     /// The canonical seal — its `audience` and `roles` (each a
-    /// [`SealedRole`]: TTL bounds) are the
+    /// [`SealedRole`]: `ttl_seconds`) are the
     /// authority surface; the policy *bytes* live in `templates`.
     pub seal: Seal,
     /// Verified policy templates, role → bytes.
@@ -345,15 +345,11 @@ audience = "mint"
 bucket = "demo-bucket"
 [[role]]
 name = "volume-ro"
-min_ttl_seconds = 60
-max_ttl_seconds = 3600
-default_ttl_seconds = 3600
+ttl_seconds = 3600
 policy_file = "volume-ro.json"
 [[role]]
 name = "volume-rw"
-min_ttl_seconds = 60
-max_ttl_seconds = 3600
-default_ttl_seconds = 3600
+ttl_seconds = 3600
 policy_file = "volume-rw.json"
 "#;
         crate::config::parse_for_test(

@@ -18,8 +18,8 @@
 //!    attested values baked in). Same `sub`/`cnf`; no `exp`.
 //! 4. [`mint_intermediate`] — `op=exchange-finalize`, minted at
 //!    `POST /v1/enroll-exchange` for an attested role. Carries the
-//!    undischarged attested third-party caveat; step 1 of two. Its `exp`
-//!    is the role's `intermediate_ttl_seconds` (`0` ⟹ no `exp`).
+//!    undischarged attested third-party caveat; step 1 of two. Durable
+//!    (no `exp`) — the holder finalizes it per-use.
 //!
 //! MAC verification, the `op`/`aud`/`invite` gates, the holder-of-key
 //! PoP and the pending/approval lookup are the HTTP layer's job (they
@@ -210,18 +210,16 @@ pub fn mint_credential(
 /// mint), not an attenuation of the ticket — mirrors
 /// [`mint_credential_ticket`] one level deeper.
 ///
-/// `exp` bounds how long the holder may discharge and finalize this
-/// intermediate, from the role's `intermediate_ttl_seconds`. `None` (config
-/// `0`) stamps no `exp`: the intermediate never expires, so the holder keeps
-/// it and finalizes per-use for its lifetime. A no-`exp` intermediate
-/// verifies and clears cleanly at finalize — `exp` is a bound, not a
-/// required caveat.
+/// The intermediate carries no `exp`: it is durable, held by the holder and
+/// finalized per-use for its lifetime. A no-`exp` intermediate verifies and
+/// clears cleanly at finalize — `exp` is a bound, not a required caveat — and
+/// its discharge still binds to the current `K_M-B`, so a key rotation
+/// retires any outstanding ones.
 ///
 /// The intermediate carries no caveat *values* — every non-reserved value is
 /// proposed to the attestation authority and baked at `exchange-finalize`
 /// from the discharge. The intermediate carries only identity, role, and the
 /// undischarged TPC.
-#[allow(clippy::too_many_arguments)]
 pub fn mint_intermediate(
     keyring: &Keyring,
     audience: &str,
@@ -229,10 +227,9 @@ pub fn mint_intermediate(
     cnf: &str,
     role: &str,
     rev_epoch: u64,
-    exp: Option<u64>,
     attested: AttestedTpc<'_>,
 ) -> Macaroon {
-    let mut caveats = vec![
+    let caveats = vec![
         Caveat::scalar(name::OP, op::EXCHANGE_FINALIZE),
         Caveat::scalar(name::AUD, audience),
         Caveat::scalar(name::SUB, sub),
@@ -240,9 +237,6 @@ pub fn mint_intermediate(
         Caveat::scalar(name::ROLE, role),
         Caveat::scalar(name::EPOCH, rev_epoch.to_string()),
     ];
-    if let Some(exp_unix) = exp {
-        caveats.push(Caveat::scalar(name::EXP, exp_unix.to_string()));
-    }
     let base = macaroon::mint(keyring, caveats);
     // `r` is fresh per caveat, so the discharge binds to this intermediate
     // alone; the holder cannot recover it (it has neither `K_M-B` nor the
@@ -442,7 +436,6 @@ mod tests {
             &cnf(),
             "volume-ro",
             7,
-            Some(1_700_000_000),
             AttestedTpc {
                 k_m_b: &K_M_B,
                 org_id: "org_demo",
@@ -451,8 +444,8 @@ mod tests {
             },
         );
         assert!(interm.verify(&kr));
-        // The intermediate carries no caveat values — only its own partition
-        // + identity + a short exp, plus the undischarged TPC.
+        // The intermediate carries no caveat values and no `exp` — only its
+        // own partition + identity, plus the undischarged TPC.
         let pe = EffectiveCaveats::new(interm.caveats());
         assert_eq!(
             pe.resolve(name::OP),
@@ -460,7 +453,11 @@ mod tests {
         );
         assert_eq!(pe.resolve(name::ROLE), Resolved::Value("volume-ro".into()));
         assert_eq!(pe.resolve(name::SUB), Resolved::Value(SUB.into()));
-        assert_eq!(pe.min_bound(name::EXP), Some(1_700_000_000));
+        assert_eq!(
+            pe.min_bound(name::EXP),
+            None,
+            "the durable intermediate carries no exp"
+        );
         // Plus exactly one third-party caveat, naming the authority.
         assert_eq!(tpc_count(&interm), 1);
         let (location, cid) = interm
@@ -496,18 +493,7 @@ mod tests {
             role: "volume-ro",
             location: ATT_LOCATION,
         };
-        let mint_one = || {
-            mint_intermediate(
-                &kr,
-                "mint",
-                SUB,
-                &cnf(),
-                "volume-ro",
-                7,
-                Some(1_700_000_000),
-                attested(),
-            )
-        };
+        let mint_one = || mint_intermediate(&kr, "mint", SUB, &cnf(), "volume-ro", 7, attested());
         let r_of = |cred: &Macaroon| {
             let cid = cred
                 .caveats()

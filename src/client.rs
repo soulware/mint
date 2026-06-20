@@ -494,15 +494,15 @@ fn parse_caveats(args: &[String]) -> Result<Vec<CaveatArg>, ClientError> {
         .collect()
 }
 
-/// The assume-role request body: just the client-owned `ts`/`role`/
-/// `ttl_seconds`. These are the only fields mint reads (scoping is
-/// attested by a discharge, not the body), so there is nothing else to
-/// send. Pure + ts-injected for testability.
-fn build_request_body(role: &str, ttl_seconds: u64, ts: u64) -> String {
+/// The assume-role request body: just the client-owned `ts`/`role`. These
+/// are the only fields mint reads — scoping is attested by a discharge, not
+/// the body, and the lifetime is the role's sealed `ttl_seconds` (clamped to
+/// the macaroon's `exp`) — so there is nothing else to send. Pure +
+/// ts-injected for testability.
+fn build_request_body(role: &str, ts: u64) -> String {
     let mut obj = serde_json::Map::new();
     obj.insert("ts".into(), ts.into());
     obj.insert("role".into(), role.into());
-    obj.insert("ttl_seconds".into(), ttl_seconds.into());
     serde_json::Value::Object(obj).to_string()
 }
 
@@ -542,7 +542,7 @@ pub async fn assume_role(
     // discharged and baked in at exchange — so `assume-role` presents a
     // bare primary with no discharge.
     eprintln!("  → POST {base_url}/v1/assume-role");
-    let body = build_request_body(role, ttl_seconds, now_unix());
+    let body = build_request_body(role, now_unix());
     let (status, text) = post_bundle(base_url, "/v1/assume-role", &mac, &[], &sk, body).await?;
     if status != 200 {
         return Err(ClientError::Server { status, body: text });
@@ -819,16 +819,11 @@ mod tests {
     fn request_body_carries_only_client_owned_fields() {
         // The body is exactly the client-owned conventional fields — mint
         // reads nothing else, so the client sends nothing else.
-        let b = build_request_body("read", 900, 1000);
+        let b = build_request_body("read", 1000);
         let v: serde_json::Value = serde_json::from_str(&b).unwrap();
         assert_eq!(v["ts"], 1000);
         assert_eq!(v["role"], "read");
-        assert_eq!(v["ttl_seconds"], 900);
-        assert_eq!(
-            v.as_object().unwrap().len(),
-            3,
-            "only ts/role/ttl_seconds are sent"
-        );
+        assert_eq!(v.as_object().unwrap().len(), 2, "only ts/role are sent");
     }
 
     #[test]
