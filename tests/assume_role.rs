@@ -12,7 +12,7 @@ use mint::caveat::{Caveat, name, op};
 use mint::config::Config;
 use mint::http::{AppState, router};
 use mint::iam::FakeMinter;
-use mint::issuance::mint_credential;
+use mint::issuance::{BakedCaveat, mint_credential};
 use mint::keyring::Keyring;
 use mint::macaroon::{Macaroon, mint};
 use mint::pop;
@@ -143,7 +143,7 @@ fn request_macaroon_at_epoch(rev_epoch: u64) -> Macaroon {
         &pop::cnf_value(&SigningKey::from_bytes(&CLIENT_SEED)),
         "volume-ro",
         rev_epoch,
-        &[("volume".to_string(), VOLUME.to_string())],
+        &[BakedCaveat::new("volume", VOLUME)],
     )
     .attenuate(Caveat::scalar(name::EXP, far_future().to_string()))
 }

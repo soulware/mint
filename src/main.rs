@@ -134,6 +134,13 @@ enum ClientCmd {
         /// Defaults to `credentials/<role>`.
         #[arg(long)]
         out: Option<String>,
+        /// Holder-supplied caveat to fix into this exchange (repeatable) —
+        /// a name the role's sealed `holder` contract declares, baked
+        /// verbatim into the credential as `{{caveat.X}}`. Vocabulary-
+        /// agnostic; e.g. `--caveat bucket=images`. Distinct from
+        /// `--attest` (the attestation authority's vocabulary).
+        #[arg(long = "caveat", value_name = "NAME=VALUE")]
+        caveat: Vec<String>,
         /// Value for the attestation authority to attest (repeatable) —
         /// the names the role's `[role.attestation]` declares, baked into
         /// the credential as `{{caveat.X}}`. Vocabulary-agnostic; required
@@ -295,11 +302,14 @@ async fn client_cmd(
             role,
             in_file,
             out,
+            caveat,
             attest,
         } => {
             let transport = client_transport(socket)?;
             let out = out.unwrap_or_else(|| mint::client::credential_path(&role));
-            if mint::client::exchange(&dir, &transport, &in_file, &role, &out, &attest).await? {
+            if mint::client::exchange(&dir, &transport, &in_file, &role, &out, &caveat, &attest)
+                .await?
+            {
                 Ok(())
             } else {
                 eprintln!(

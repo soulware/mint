@@ -87,13 +87,18 @@ struct AssumeRoleBody {
     ttl_seconds: Option<u64>,
 }
 
-/// `/v1/enroll-exchange` body — `{ts, role}`. `ts` is handled by the
-/// PoP machinery (it signs the whole body); `role` is the role this
-/// exchange mints a credential for, authenticated by that same
-/// signature.
+/// `/v1/enroll-exchange` body — `{ts, role, caveats}`. `ts` is handled by
+/// the PoP machinery (it signs the whole body); `role` is the role this
+/// exchange mints a credential for; `caveats` are the holder-supplied
+/// `(name, value)` pairs the role's sealed `holder` contract permits, baked
+/// verbatim into the credential. All three are authenticated by that same
+/// PoP signature. `caveats` defaults to empty — a role declaring no holder
+/// source takes none.
 #[derive(Deserialize)]
 struct ExchangeBody {
     role: String,
+    #[serde(default)]
+    caveats: std::collections::BTreeMap<String, String>,
 }
 
 fn respond(request_id: &str, status: StatusCode, body: serde_json::Value) -> Response {
@@ -1098,19 +1103,56 @@ async fn enroll_exchange(
         }
     };
 
-    // The requested role rides the PoP-signed body (already verified
-    // above), so it is authenticated. Floor authorization (§
-    // *Enrollment* (3), option (a)): it must name a configured role —
-    // per-`sub` scoping lives in the role policy, not here. Failure is
-    // the same opaque 401 as any other (a role this `sub` may not have
-    // must not be distinguishable from a bad token).
-    let role = match serde_json::from_slice::<ExchangeBody>(&body) {
-        Ok(b) if surface.role(&b.role).is_some() => b.role,
-        _ => {
+    // The requested role and holder-supplied caveats ride the PoP-signed
+    // body (already verified above), so they are authenticated. Floor
+    // authorization (§ *Enrollment* (3), option (a)): the role must name a
+    // sealed role — per-`sub` scoping lives in the role policy, not here.
+    // Failure is the same opaque 401 as any other (a role this `sub` may
+    // not have must not be distinguishable from a bad token).
+    let exch = match serde_json::from_slice::<ExchangeBody>(&body) {
+        Ok(b) => b,
+        Err(_) => {
             audit("denied:unknown_role", &caveats, "");
             return unauthorized(&request_id);
         }
     };
+    let Some(sealed_role) = surface.role(&exch.role) else {
+        audit("denied:unknown_role", &caveats, "");
+        return unauthorized(&request_id);
+    };
+    let role = exch.role.clone();
+
+    // Resolve the holder-source caveats against the role's **sealed**
+    // `holder` contract (the provenance pin, not the live config). Every
+    // declared holder name must be present in the body and no name outside
+    // the contract may ride along: a holder cannot smuggle in an extra
+    // caveat or omit a required one. These bake verbatim into the
+    // credential — mint vouches only that they were holder-asserted, the
+    // deployment's IAM account boundary contains their scope. Fail closed
+    // on either divergence with a clean 400 (the role is known; the request
+    // is malformed).
+    let mut baked: Vec<issuance::BakedCaveat> = Vec::with_capacity(sealed_role.holder.len());
+    for n in &sealed_role.holder {
+        match exch.caveats.get(n) {
+            Some(v) => baked.push(issuance::BakedCaveat::new(n.clone(), v.clone())),
+            None => {
+                audit("denied:missing_holder", &caveats, &role);
+                return respond(
+                    &request_id,
+                    StatusCode::BAD_REQUEST,
+                    json!({"error": "bad request"}),
+                );
+            }
+        }
+    }
+    if exch.caveats.keys().any(|k| !sealed_role.holder.contains(k)) {
+        audit("denied:unexpected_holder", &caveats, &role);
+        return respond(
+            &request_id,
+            StatusCode::BAD_REQUEST,
+            json!({"error": "bad request"}),
+        );
+    }
 
     // Operator authority is exercised at the enroll/exchange gates above,
     // never at `assume-role`. A role that declares `[role.attestation]`
@@ -1134,7 +1176,7 @@ async fn enroll_exchange(
             &cnf,
             &role,
             rev_epoch,
-            &[],
+            &baked,
         ),
         Some(mode) => {
             // Config load rejects an attestation role without a location,
@@ -1182,6 +1224,7 @@ async fn enroll_exchange(
                 &role,
                 rev_epoch,
                 exp,
+                &baked,
                 attested,
             )
         }
@@ -1233,6 +1276,18 @@ async fn exchange_finalize(
         });
     };
 
+    // Finalize mints the assume-role credential, so it reads the role's
+    // sealed contract (the `attested`/`holder` source declarations) and is
+    // seal-gated like enroll-exchange — a dormant host finalizes nothing.
+    let seal = state.seal.load();
+    let surface = match seal.as_ref() {
+        SealState::Serving(s) => s,
+        SealState::Dormant => {
+            audit("denied:not_sealed", &[], "");
+            return not_sealed(&request_id);
+        }
+    };
+
     let Some(bundle) = extract_bundle(&headers) else {
         audit("denied:unauthenticated", &[], "");
         return unauthorized(&request_id);
@@ -1279,8 +1334,8 @@ async fn exchange_finalize(
             return unauthorized(&request_id);
         }
     };
-    let Some(role_cfg) = state.config.roles.get(&role) else {
-        // The intermediate named a role that is no longer configured.
+    let Some(sealed_role) = surface.role(&role) else {
+        // The intermediate named a role that is no longer sealed.
         tracing::error!(role = %role, "exchange-finalize for unknown role");
         audit("denied:unknown_role", &caveats, &role);
         return unauthorized(&request_id);
@@ -1326,14 +1381,35 @@ async fn exchange_finalize(
         }
     };
 
+    // Re-stamp the holder-source caveats carried (MAC'd) on the
+    // intermediate from step 1. They were validated against the sealed
+    // `holder` contract and baked at enroll-exchange; read them back off
+    // the verified intermediate so the final credential carries them
+    // identically to a non-attested role's. The names come from the same
+    // sealed contract, so a drift between step 1 and step 2 fails closed.
+    let interm = EffectiveCaveats::new(cleared.primary.caveats());
+    let mut baked: Vec<issuance::BakedCaveat> = Vec::new();
+    for n in &sealed_role.holder {
+        match interm.resolve(n) {
+            Resolved::Value(v) => baked.push(issuance::BakedCaveat::new(n.clone(), v)),
+            _ => {
+                audit("denied:missing_holder", &caveats, &role);
+                return respond(
+                    &request_id,
+                    StatusCode::BAD_REQUEST,
+                    json!({"error": "bad request"}),
+                );
+            }
+        }
+    }
+
     // Bake the role's declared attested names from the authority's
     // discharge. Each must resolve to a single value (fail closed on a
     // missing one); a gate-only role declares none and bakes nothing.
     let dis = EffectiveCaveats::new(&cleared.discharge_caveats);
-    let mut baked: Vec<(String, String)> = Vec::new();
-    for n in &role_cfg.attested {
+    for n in &sealed_role.attested {
         match dis.resolve(n) {
-            Resolved::Value(v) => baked.push((n.clone(), v)),
+            Resolved::Value(v) => baked.push(issuance::BakedCaveat::new(n.clone(), v)),
             _ => {
                 audit("denied:missing_attested", &caveats, &role);
                 return respond(

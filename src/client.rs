@@ -342,9 +342,15 @@ pub async fn exchange(
     in_file: &str,
     role: &str,
     out: &str,
+    caveat: &[String],
     attest: &[String],
 ) -> Result<bool, ClientError> {
     let sk = load_key(dir)?;
+    // Holder-supplied caveats fixed into this exchange (e.g. `bucket`): mint
+    // bakes them verbatim per the role's sealed `holder` contract. Distinct
+    // from `--attest` (the attestation authority's vocabulary, step 2).
+    let holder: std::collections::BTreeMap<String, String> =
+        parse_caveats(caveat)?.into_iter().collect();
     let in_path = dir.join(in_file);
     let ticket = Macaroon::decode(read_text(&in_path, "run `mint client enroll …` first")?.trim())
         .map_err(|_| ClientError::BadFile("credential ticket"))?;
@@ -360,11 +366,12 @@ pub async fn exchange(
     eprintln!(
         "  → POST {base_url}/v1/enroll-exchange  role={role}  (signed with your client key — proof-of-possession)"
     );
-    let body = format!(
-        r#"{{"ts":{},"role":{}}}"#,
-        now_unix(),
-        serde_json::Value::from(role)
-    );
+    let body = serde_json::json!({
+        "ts": now_unix(),
+        "role": role,
+        "caveats": holder,
+    })
+    .to_string();
     let (status, text) = post_bundle(
         base_url,
         "/v1/enroll-exchange",

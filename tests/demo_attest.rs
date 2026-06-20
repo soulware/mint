@@ -129,6 +129,7 @@ fn intermediate(k_m_b: &[u8; 32]) -> Macaroon {
         "attested-write",
         0,
         Some(far_future()),
+        &[],
         AttestedTpc {
             k_m_b,
             org_id: "demo",
