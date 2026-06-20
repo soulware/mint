@@ -349,8 +349,10 @@ pub async fn exchange(
     // Holder-supplied caveats fixed into this exchange (e.g. `bucket`): mint
     // bakes them verbatim per the role's sealed `holder` contract. Distinct
     // from `--attest` (the attestation authority's vocabulary, step 2).
-    let holder: std::collections::BTreeMap<String, String> =
-        parse_caveats(caveat)?.into_iter().collect();
+    let holder: std::collections::BTreeMap<String, String> = parse_caveats(caveat)?
+        .into_iter()
+        .map(CaveatArg::into_pair)
+        .collect();
     let in_path = dir.join(in_file);
     let ticket = Macaroon::decode(read_text(&in_path, "run `mint client enroll …` first")?.trim())
         .map_err(|_| ClientError::BadFile("credential ticket"))?;
@@ -437,7 +439,7 @@ fn scalar_value(m: &Macaroon, name: &str) -> Option<String> {
 async fn finalize_attested(
     base_url: &str,
     intermediate: &Macaroon,
-    attest: &[(String, String)],
+    attest: &[CaveatArg],
     sk: &SigningKey,
 ) -> Result<String, ClientError> {
     let discharges = attest_discharges(intermediate, attest).await?;
@@ -465,13 +467,39 @@ async fn finalize_attested(
     Ok(credential)
 }
 
-/// Parse `NAME=VALUE` narrowing-caveat args. mint is
+/// A parsed `NAME=VALUE` CLI argument — a narrowing caveat (`assume-role`),
+/// a holder-supplied value (`exchange --caveat`), or a value for the
+/// attestation authority (`exchange --attest`). Named rather than a bare
+/// `(String, String)` so name and value cannot be transposed at the sites
+/// that consume them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CaveatArg {
+    name: String,
+    value: String,
+}
+
+impl CaveatArg {
+    fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            value: value.into(),
+        }
+    }
+
+    /// Consume into the `(name, value)` pair the JSON/`BTreeMap` wire
+    /// representations want.
+    fn into_pair(self) -> (String, String) {
+        (self.name, self.value)
+    }
+}
+
+/// Parse `NAME=VALUE` args, splitting on the first `=`. mint is
 /// caveat-vocabulary-agnostic, so the client is too: no name is
 /// special-cased.
-fn parse_caveats(args: &[String]) -> Result<Vec<(String, String)>, ClientError> {
+fn parse_caveats(args: &[String]) -> Result<Vec<CaveatArg>, ClientError> {
     args.iter()
         .map(|a| match a.split_once('=') {
-            Some((n, v)) if !n.is_empty() => Ok((n.to_string(), v.to_string())),
+            Some((n, v)) if !n.is_empty() => Ok(CaveatArg::new(n, v)),
             _ => Err(ClientError::BadCaveat(a.clone())),
         })
         .collect()
@@ -523,8 +551,8 @@ pub async fn assume_role(
     // caveats.
     let exp = now_unix().saturating_add(ttl_seconds);
     mac = mac.attenuate(Caveat::scalar(name::EXP, exp.to_string()));
-    for (n, v) in &caveats {
-        mac = mac.attenuate(Caveat::scalar(n.as_str(), v.as_str()));
+    for c in &caveats {
+        mac = mac.attenuate(Caveat::scalar(c.name.as_str(), c.value.as_str()));
     }
     eprintln!(
         "  appended exp={exp} + {} narrowing caveat(s)",
@@ -552,7 +580,7 @@ pub async fn assume_role(
 /// list without touching either.
 async fn attest_discharges(
     credential: &Macaroon,
-    attest: &[(String, String)],
+    attest: &[CaveatArg],
 ) -> Result<Vec<Macaroon>, ClientError> {
     let has_tpc = credential
         .caveats()
@@ -569,7 +597,8 @@ async fn attest_discharges(
     // it cannot tell the two apart up front).
     let session = crate::session::load_session()?;
     let transport = crate::session::load_attest_transport()?;
-    let attested: std::collections::BTreeMap<String, String> = attest.iter().cloned().collect();
+    let attested: std::collections::BTreeMap<String, String> =
+        attest.iter().cloned().map(CaveatArg::into_pair).collect();
     let mut discharges = Vec::new();
     for c in credential.caveats() {
         let Caveat::ThirdParty { location, cid, .. } = c else {
@@ -832,8 +861,8 @@ mod tests {
             "Region=eu=west".into(), // only the first '=' splits
         ])
         .unwrap();
-        assert_eq!(ok[0], ("elide:Volume".into(), "01VOL".into()));
-        assert_eq!(ok[1], ("Region".into(), "eu=west".into()));
+        assert_eq!(ok[0], CaveatArg::new("elide:Volume", "01VOL"));
+        assert_eq!(ok[1], CaveatArg::new("Region", "eu=west"));
         for bad in ["novalue", "=novalue"] {
             assert!(matches!(
                 parse_caveats(&[bad.to_string()]),
