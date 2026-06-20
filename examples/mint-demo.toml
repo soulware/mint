@@ -97,8 +97,8 @@ caveat = ["bucket", "sub"]
 # account boundary, so a holder cannot widen past what the account allows.
 holder = ["bucket"]
 
-# `demo-attested` — adds the attested layer. Same holder `bucket` and issuer
-# `sub`, plus a `project` an authority must vouch for before assume-role.
+# `demo-attested` — adds the attested layer. Same holder `bucket`, plus a
+# `project` an authority must vouch for before assume-role.
 #   mint client exchange --caveat bucket=acme-data --attest project=apollo demo-attested
 [[role]]
 name = "demo-attested"
@@ -106,8 +106,8 @@ min_ttl_seconds = 60
 max_ttl_seconds = 900
 default_ttl_seconds = 300
 [role.template]
-# `bucket` holder-supplied, `project` attestation-sourced, `sub` issuer-stamped.
-caveat = ["bucket", "project", "sub"]
+# `bucket` holder-supplied, `project` attestation-sourced.
+caveat = ["bucket", "project"]
 holder = ["bucket"]
 
 # Marks the role attested: its credential carries an attested third-party

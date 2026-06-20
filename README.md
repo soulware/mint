@@ -125,9 +125,8 @@ Once a client has successfully enrolled with mint it can exchange its credential
 
 For a more complex example the `demo-attested` role adds a value a third party must vouch for. By default mint runs with a demo attestation service available via `attest.sock` locally.
 
-The template for the `demo-attested` role substitutes three `{{caveat.X}}` values, one of each provenance:
+The template for the `demo-attested` role substitutes two `{{caveat.X}}` values, across two provenances:
 
-* `{{caveat.sub}}` - the client identifier (issuer-stamped at enrollment)
 * `{{caveat.bucket}}` - the bucket (holder-supplied at _exchange_)
 * `{{caveat.project}}` - role-specific value (attested at _exchange_ via third-party caveat)
 
