@@ -1,7 +1,9 @@
 # Design: caveat provenance, and the removal of `[env]`
 
 Status: **landed**. Holder-provenance scaffolding (PR #23), exchange baking
-(PR #24), and the `[env]` removal (PR #26).
+(PR #24), and the `[env]` removal (PR #26). A proposed follow-on,
+`design-always-attest.md`, collapses `holder` into `attested` — retiring the
+three-source model below for two.
 
 This document specifies a single, uniform model for how every value a
 policy template substitutes enters a credential. It replaces the current
