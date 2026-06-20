@@ -53,6 +53,9 @@ fn mint_demo_config_loads() {
     let mut names: Vec<&str> = cfg.roles.keys().map(String::as_str).collect();
     names.sort_unstable();
     assert_eq!(names, ["demo", "demo-attested"]);
+    // `demo` is issuer-only (binds only `sub`); `demo-attested` binds
+    // non-reserved caveats and carries the attested TPC.
+    assert!(!cfg.roles["demo"].is_attested(), "demo is issuer-only");
     assert!(
         cfg.roles["demo-attested"].is_attested(),
         "demo-attested carries the attested TPC"

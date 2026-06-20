@@ -211,17 +211,16 @@ pub fn mint_credential(
 /// [`mint_credential_ticket`] one level deeper.
 ///
 /// `exp` bounds how long the holder may discharge and finalize this
-/// intermediate, from the role's `[role.attestation].intermediate_ttl_seconds`.
-/// `None` (config `0`) stamps no `exp`: the intermediate never expires, so
-/// the holder keeps it and finalizes per-use for its lifetime. A no-`exp`
-/// intermediate verifies and clears cleanly at finalize — `exp` is a bound,
-/// not a required caveat.
+/// intermediate, from the role's `intermediate_ttl_seconds`. `None` (config
+/// `0`) stamps no `exp`: the intermediate never expires, so the holder keeps
+/// it and finalizes per-use for its lifetime. A no-`exp` intermediate
+/// verifies and clears cleanly at finalize — `exp` is a bound, not a
+/// required caveat.
 ///
-/// `baked` carries the holder-supplied caveats fixed at `enroll-exchange`
-/// (from the PoP-signed body). They are MAC'd into the intermediate here so
-/// the holder cannot tamper with them, and `exchange-finalize` reads them
-/// back off this chain to re-stamp onto the final credential alongside the
-/// attested values. A role declaring no holder source passes `&[]`.
+/// The intermediate carries no caveat *values* — every non-reserved value is
+/// proposed to the attestation authority and baked at `exchange-finalize`
+/// from the discharge. The intermediate carries only identity, role, and the
+/// undischarged TPC.
 #[allow(clippy::too_many_arguments)]
 pub fn mint_intermediate(
     keyring: &Keyring,
@@ -231,7 +230,6 @@ pub fn mint_intermediate(
     role: &str,
     rev_epoch: u64,
     exp: Option<u64>,
-    baked: &[BakedCaveat],
     attested: AttestedTpc<'_>,
 ) -> Macaroon {
     let mut caveats = vec![
@@ -244,9 +242,6 @@ pub fn mint_intermediate(
     ];
     if let Some(exp_unix) = exp {
         caveats.push(Caveat::scalar(name::EXP, exp_unix.to_string()));
-    }
-    for b in baked {
-        caveats.push(Caveat::scalar(&b.name, &b.value));
     }
     let base = macaroon::mint(keyring, caveats);
     // `r` is fresh per caveat, so the discharge binds to this intermediate
@@ -448,7 +443,6 @@ mod tests {
             "volume-ro",
             7,
             Some(1_700_000_000),
-            &[BakedCaveat::new("bucket", "images")],
             AttestedTpc {
                 k_m_b: &K_M_B,
                 org_id: "org_demo",
@@ -457,14 +451,8 @@ mod tests {
             },
         );
         assert!(interm.verify(&kr));
-        // Holder-supplied caveats baked at enroll-exchange ride the
-        // intermediate as ordinary MAC'd scalars, ready for finalize to
-        // re-stamp onto the credential.
-        assert_eq!(
-            EffectiveCaveats::new(interm.caveats()).resolve("bucket"),
-            Resolved::Value("images".into())
-        );
-        // The intermediate's own partition + identity + a short exp.
+        // The intermediate carries no caveat values — only its own partition
+        // + identity + a short exp, plus the undischarged TPC.
         let pe = EffectiveCaveats::new(interm.caveats());
         assert_eq!(
             pe.resolve(name::OP),
@@ -517,7 +505,6 @@ mod tests {
                 "volume-ro",
                 7,
                 Some(1_700_000_000),
-                &[],
                 attested(),
             )
         };

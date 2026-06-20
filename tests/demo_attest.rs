@@ -46,10 +46,6 @@ min_ttl_seconds = 60
 max_ttl_seconds = 900
 default_ttl_seconds = 300
 policy_file = "attested-write.json"
-[role.template]
-caveat = ["project", "sub"]
-[role.attestation]
-attested = ["project"]
 intermediate_ttl_seconds = 0
 "#;
 
@@ -126,7 +122,6 @@ fn intermediate(k_m_b: &[u8; 32]) -> Macaroon {
         "attested-write",
         0,
         Some(far_future()),
-        &[],
         AttestedTpc {
             k_m_b,
             org_id: "demo",
@@ -236,7 +231,7 @@ async fn demo_attest_loop_bakes_then_renders() {
     let (status, body) = attest_request(
         &state,
         Some(&session),
-        serde_json::json!({"cid": b64(&tpc_cid(&interm)), "attested": {"project": PROJECT}}),
+        serde_json::json!({"cid": b64(&tpc_cid(&interm)), "caveats": {"project": PROJECT}}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "discharge: {body}");
@@ -294,7 +289,7 @@ async fn discharge_requires_a_session() {
     let (status, _) = attest_request(
         &state,
         None,
-        serde_json::json!({"cid": b64(&tpc_cid(&interm)), "attested": {"project": PROJECT}}),
+        serde_json::json!({"cid": b64(&tpc_cid(&interm)), "caveats": {"project": PROJECT}}),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -312,7 +307,7 @@ async fn discharge_refuses_reserved_attested_names() {
         let (status, body) = attest_request(
             &state,
             Some(&session),
-            serde_json::json!({"cid": b64(&tpc_cid(&interm)), "attested": {*reserved: "forged"}}),
+            serde_json::json!({"cid": b64(&tpc_cid(&interm)), "caveats": {*reserved: "forged"}}),
         )
         .await;
         assert_eq!(
@@ -333,7 +328,7 @@ async fn discharge_allows_an_empty_attested_set() {
     let (status, body) = attest_request(
         &state,
         Some(&session),
-        serde_json::json!({"cid": b64(&tpc_cid(&interm)), "attested": {}}),
+        serde_json::json!({"cid": b64(&tpc_cid(&interm)), "caveats": {}}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "gate-only discharge: {body}");
@@ -351,7 +346,7 @@ async fn finalize_missing_attested_value_is_400() {
     let (status, body) = attest_request(
         &state,
         Some(&session),
-        serde_json::json!({"cid": b64(&tpc_cid(&interm)), "attested": {}}),
+        serde_json::json!({"cid": b64(&tpc_cid(&interm)), "caveats": {}}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "gate-only discharge: {body}");

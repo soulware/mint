@@ -134,19 +134,13 @@ enum ClientCmd {
         /// Defaults to `credentials/<role>`.
         #[arg(long)]
         out: Option<String>,
-        /// Holder-supplied caveat to fix into this exchange (repeatable) —
-        /// a name the role's sealed `holder` contract declares, baked
-        /// verbatim into the credential as `{{caveat.X}}`. Vocabulary-
-        /// agnostic; e.g. `--caveat bucket=images`. Distinct from
-        /// `--attest` (the attestation authority's vocabulary).
+        /// Caveat value to propose for this exchange (repeatable) — a
+        /// non-reserved `{{caveat.X}}` the role's template binds, proposed to
+        /// the attestation authority and baked once vouched. Vocabulary-
+        /// agnostic; e.g. `--caveat bucket=images`. An issuer-only role
+        /// (sub-scoped) takes none.
         #[arg(long = "caveat", value_name = "NAME=VALUE")]
         caveat: Vec<String>,
-        /// Value for the attestation authority to attest (repeatable) —
-        /// the names the role's `[role.attestation]` declares, baked into
-        /// the credential as `{{caveat.X}}`. Vocabulary-agnostic; required
-        /// for an attested role (a gate-only role takes none).
-        #[arg(long = "attest", value_name = "NAME=VALUE")]
-        attest: Vec<String>,
         /// Role to exchange the ticket for. One credential per role —
         /// run `exchange` once per role you are authorized for.
         #[arg(value_name = "ROLE")]
@@ -299,13 +293,10 @@ async fn client_cmd(
             in_file,
             out,
             caveat,
-            attest,
         } => {
             let transport = client_transport(socket)?;
             let out = out.unwrap_or_else(|| mint::client::credential_path(&role));
-            if mint::client::exchange(&dir, &transport, &in_file, &role, &out, &caveat, &attest)
-                .await?
-            {
+            if mint::client::exchange(&dir, &transport, &in_file, &role, &out, &caveat).await? {
                 Ok(())
             } else {
                 eprintln!(
@@ -858,10 +849,11 @@ fn role_inspect(config: &Path, name: &str) -> Result<(), Box<dyn std::error::Err
                 }
                 // Surface + template come from the sealed bytes.
                 print_policy_surface(sealed_policy);
-                // The request contract (`[role.template]`) is sealed too;
-                // flag a local declaration that has drifted from it.
+                // The caveat manifest + attested set (derived from the
+                // template) are sealed too; flag a local template that has
+                // drifted from the sealed contract.
                 if sealed.attested != role.attested || sealed.caveat != role.caveat {
-                    eprintln!("  \u{26a0} local [role.template] has drifted from the seal:");
+                    eprintln!("  \u{26a0} local caveat contract has drifted from the seal:");
                     eprintln!(
                         "      sealed: attested={:?} caveat={:?}",
                         sealed.attested, sealed.caveat

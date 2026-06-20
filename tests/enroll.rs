@@ -58,10 +58,6 @@ min_ttl_seconds = 60
 max_ttl_seconds = 2592000
 default_ttl_seconds = 2592000
 policy_file = "volume-ro.json"
-[role.template]
-caveat = ["volume"]
-[role.attestation]
-attested = ["volume"]
 intermediate_ttl_seconds = 0
 [[role]]
 name = "volume-rw"
@@ -69,41 +65,9 @@ min_ttl_seconds = 60
 max_ttl_seconds = 3600
 default_ttl_seconds = 900
 policy_file = "volume-rw.json"
-[[role]]
-name = "holder-bucket"
-min_ttl_seconds = 60
-max_ttl_seconds = 3600
-default_ttl_seconds = 900
-policy_file = "holder-bucket.json"
-[role.template]
-caveat = ["bucket"]
-holder = ["bucket"]
-[[role]]
-name = "vol-bucket"
-min_ttl_seconds = 60
-max_ttl_seconds = 2592000
-default_ttl_seconds = 2592000
-policy_file = "vol-bucket.json"
-[role.template]
-caveat = ["volume", "bucket"]
-holder = ["bucket"]
-[role.attestation]
-attested = ["volume"]
-intermediate_ttl_seconds = 0
 "#;
 
 const VOLUME_RW_POLICY: &str = r#"{"Version":"2012-10-17","Statement":[]}"#;
-
-/// Holder-source policy: the `bucket` value is fixed by the client at
-/// exchange and baked into the credential — rendered through `{{caveat.X}}`
-/// exactly like an attested value.
-const HOLDER_BUCKET_POLICY: &str = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::{{caveat.bucket}}/*"]}]}"#;
-
-/// Mixed-provenance policy: `volume` is attested (step 2 discharge),
-/// `bucket` is holder-supplied (fixed at enroll-exchange). The declared
-/// `caveat` set must match the template's `{{caveat.X}}` tokens exactly, so
-/// both names appear.
-const VOL_BUCKET_POLICY: &str = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::{{caveat.bucket}}/by_id/{{caveat.volume}}/*"]}]}"#;
 
 const POLICY: &str = r#"
 {
@@ -123,8 +87,6 @@ fn config() -> Config {
         &[
             ("volume-ro.json", POLICY),
             ("volume-rw.json", VOLUME_RW_POLICY),
-            ("holder-bucket.json", HOLDER_BUCKET_POLICY),
-            ("vol-bucket.json", VOL_BUCKET_POLICY),
         ],
     )
 }
@@ -1124,171 +1086,4 @@ async fn durable_intermediate_is_not_usable_at_assume_role() {
         StatusCode::UNAUTHORIZED,
         "an exchange-finalize intermediate cannot be assumed directly"
     );
-}
-
-/// Enroll → approve and return the credential ticket, so a test can drive
-/// `enroll-exchange` with its own role + holder caveats.
-async fn enroll_and_approve(app: &axum::Router, store: &Store) -> Macaroon {
-    let nonce = store.current_invite().await.unwrap();
-    let cb = client_invite(&nonce, &CLIENT_SEED);
-    let (status, body) = parts(
-        app.clone()
-            .oneshot(signed("/v1/enroll", &cb, &CLIENT_SEED, ""))
-            .await
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "enroll body: {body}");
-    let ticket = field(&body, "credential.ticket");
-    store
-        .approve(
-            SUB,
-            &pop::cnf_value(&SigningKey::from_bytes(&CLIENT_SEED)),
-            "usr_op",
-            &now_iso(),
-        )
-        .await
-        .unwrap();
-    ticket
-}
-
-/// A holder-source role: the client fixes `bucket` in the PoP-signed
-/// exchange body and mint bakes it verbatim into the credential as an
-/// ordinary MAC'd caveat — no attestation, the credential is a bare primary
-/// that renders `bucket` through `{{caveat.X}}`.
-#[tokio::test]
-async fn holder_caveat_is_baked_into_credential() {
-    let (app, _audit, store, _dir) = app().await;
-    let ticket = enroll_and_approve(&app, &store).await;
-    let (status, body) = parts(
-        app.clone()
-            .oneshot(signed(
-                "/v1/enroll-exchange",
-                &ticket,
-                &CLIENT_SEED,
-                r#","role":"holder-bucket","caveats":{"bucket":"images"}"#,
-            ))
-            .await
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "exchange body: {body}");
-    let credential = field(&body, "credential");
-    let eff = EffectiveCaveats::new(credential.caveats());
-    assert_eq!(
-        eff.resolve(name::OP),
-        Resolved::Value(op::ASSUME_ROLE.into()),
-        "a holder-only role exchanges directly to a credential",
-    );
-    assert_eq!(
-        eff.resolve("bucket"),
-        Resolved::Value("images".into()),
-        "the holder-supplied value is baked verbatim",
-    );
-    assert_eq!(tpc_count(&credential), 0, "no third-party caveat");
-}
-
-/// A declared holder name omitted from the body fails closed with a clean
-/// 400 (not the opaque 401) — the credential would be missing a required
-/// caveat and is refused at exchange rather than later at assume-role.
-#[tokio::test]
-async fn missing_holder_caveat_is_400() {
-    let (app, _audit, store, _dir) = app().await;
-    let ticket = enroll_and_approve(&app, &store).await;
-    let (status, _) = parts(
-        app.clone()
-            .oneshot(signed(
-                "/v1/enroll-exchange",
-                &ticket,
-                &CLIENT_SEED,
-                r#","role":"holder-bucket""#,
-            ))
-            .await
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-}
-
-/// A caveat the role's sealed `holder` contract does not declare cannot ride
-/// the exchange body — a holder may not smuggle in an arbitrary caveat.
-#[tokio::test]
-async fn unexpected_holder_caveat_is_400() {
-    let (app, _audit, store, _dir) = app().await;
-    let ticket = enroll_and_approve(&app, &store).await;
-    let (status, _) = parts(
-        app.clone()
-            .oneshot(signed(
-                "/v1/enroll-exchange",
-                &ticket,
-                &CLIENT_SEED,
-                r#","role":"holder-bucket","caveats":{"bucket":"images","rogue":"x"}"#,
-            ))
-            .await
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-}
-
-/// Mixed provenance: `bucket` is holder-supplied at enroll-exchange and
-/// `volume` is attested at finalize. The holder value rides the intermediate
-/// (MAC'd) through step 1 and the final credential carries both, each
-/// indistinguishable from an issuer-stamped caveat.
-#[tokio::test]
-async fn holder_and_attested_both_baked_through_finalize() {
-    let (app, _audit, store, _dir) = app().await;
-    let ticket = enroll_and_approve(&app, &store).await;
-
-    // Step 1: enroll-exchange for the attested role, fixing `bucket`.
-    let (status, body) = parts(
-        app.clone()
-            .oneshot(signed(
-                "/v1/enroll-exchange",
-                &ticket,
-                &CLIENT_SEED,
-                r#","role":"vol-bucket","caveats":{"bucket":"images"}"#,
-            ))
-            .await
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "exchange body: {body}");
-    let intermediate = field(&body, "credential");
-    assert_eq!(
-        EffectiveCaveats::new(intermediate.caveats()).resolve(name::OP),
-        Resolved::Value(op::EXCHANGE_FINALIZE.into()),
-    );
-    assert_eq!(
-        EffectiveCaveats::new(intermediate.caveats()).resolve("bucket"),
-        Resolved::Value("images".into()),
-        "the holder value is MAC'd onto the intermediate at step 1",
-    );
-
-    // Step 2: finalize, attesting `volume`.
-    let (status, body) = parts(
-        app.clone()
-            .oneshot(signed_finalize(&intermediate, &CLIENT_SEED, VOLUME))
-            .await
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "finalize body: {body}");
-    let credential = field(&body, "credential");
-    let eff = EffectiveCaveats::new(credential.caveats());
-    assert_eq!(
-        eff.resolve(name::OP),
-        Resolved::Value(op::ASSUME_ROLE.into()),
-    );
-    assert_eq!(
-        eff.resolve("bucket"),
-        Resolved::Value("images".into()),
-        "the holder value carries forward from the intermediate",
-    );
-    assert_eq!(
-        eff.resolve("volume"),
-        Resolved::Value(VOLUME.into()),
-        "the attested value is baked at finalize",
-    );
-    assert_eq!(tpc_count(&credential), 0);
 }

@@ -45,10 +45,6 @@ min_ttl_seconds = 60
 max_ttl_seconds = 3600
 default_ttl_seconds = 900
 policy_file = "writer.json"
-[role.template]
-caveat = ["project"]
-[role.attestation]
-attested = ["project"]
 intermediate_ttl_seconds = 0
 "#;
 
@@ -178,10 +174,11 @@ async fn full_flow_over_unix_socket() {
     // exchange before approval: not a failure, just not yet approved.
     let role = "writer";
     let cred = mint::client::credential_path(role);
-    // `writer` is an attested role, so exchange is two-step and the attested
-    // value is supplied here (baked into the credential at finalize). The
-    // pre-approval exchange returns 403 before reaching attestation.
-    let attest = ["project=apollo".to_string()];
+    // `writer` is an attested role (it binds a non-reserved caveat), so
+    // exchange is two-step and the caveat value is proposed here (baked at
+    // finalize). The pre-approval exchange returns 403 before reaching
+    // attestation.
+    let values = ["project=apollo".to_string()];
     assert!(
         !mint::client::exchange(
             cdir.path(),
@@ -189,8 +186,7 @@ async fn full_flow_over_unix_socket() {
             mint::client::CREDENTIAL_TICKET_FILE,
             role,
             &cred,
-            &[],
-            &attest,
+            &values,
         )
         .await
         .expect("exchange call over uds"),
@@ -213,8 +209,7 @@ async fn full_flow_over_unix_socket() {
             mint::client::CREDENTIAL_TICKET_FILE,
             role,
             &cred,
-            &[],
-            &attest,
+            &values,
         )
         .await
         .expect("post-approval exchange over uds"),

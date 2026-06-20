@@ -55,25 +55,21 @@ const SEAL_DOMAIN: &[u8] = b"mint-templates-seal-v1";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SealedRole {
     /// The MAC-verified `caveat.*` names the role's template substitutes —
-    /// its declared caveat contract (`docs/design-mint.md` § *Templating*).
-    /// Sealing it pins the binding: a host enforces exactly the caveat
-    /// requirement that was authored, never a drifted local one.
+    /// the full manifest, derived from the template
+    /// (`docs/design-mint.md` § *Templating*). Sealing it pins the binding:
+    /// a host enforces exactly the caveat requirement that was authored,
+    /// never a drifted local one.
     pub caveat: Vec<String>,
     pub default_ttl_seconds: u64,
     pub max_ttl_seconds: u64,
     pub min_ttl_seconds: u64,
     /// BLAKE3 of the role's policy template file content, hex-encoded.
     pub policy_blake3: String,
-    /// The `attested.*` names the role's template substitutes — its
-    /// declared attestation contract. Sealed alongside
-    /// [`caveat`](Self::caveat) and enforced at request time before render.
+    /// The attested `caveat.*` names — the non-reserved subset of
+    /// [`caveat`](Self::caveat) the authority vouches and mint bakes at
+    /// `exchange-finalize`. Derived from the template, sealed alongside the
+    /// manifest, and enforced at request time before render.
     pub attested: Vec<String>,
-    /// The caveat names the client supplies in the `enroll-exchange` body
-    /// and mint bakes verbatim — the role's holder-source contract, a
-    /// subset of [`caveat`](Self::caveat). Sealing it pins each value's
-    /// *source*: a host cannot reclassify an `attested` name as
-    /// holder-supplied, a provenance-downgrade defence.
-    pub holder: Vec<String>,
 }
 
 /// The complete seal: every role, plus the audience. MAC'd under one
@@ -134,7 +130,6 @@ impl Seal {
                 policy,
                 attested,
                 caveat,
-                holder,
                 // The intermediate's `exp` lifetime is read from live config
                 // at enroll-exchange and stamped onto the intermediate, not
                 // the assume-role credential the seal pins — outside the
@@ -150,7 +145,6 @@ impl Seal {
                     min_ttl_seconds: *min_ttl_seconds,
                     policy_blake3: hash_hex(policy.as_bytes()),
                     attested: attested.clone(),
-                    holder: holder.clone(),
                 },
             );
         }
@@ -263,12 +257,6 @@ impl Seal {
                 diffs.push(format!(
                     "role {name}: caveat contract sealed as {:?}, local config has {:?}",
                     sealed.caveat, role.caveat,
-                ));
-            }
-            if sealed.holder != role.holder {
-                diffs.push(format!(
-                    "role {name}: holder contract sealed as {:?}, local config has {:?}",
-                    sealed.holder, role.holder,
                 ));
             }
         }
@@ -625,16 +613,14 @@ min_ttl_seconds = 60
 max_ttl_seconds = 3600
 default_ttl_seconds = 3600
 policy_file = "coord-rw.json"
-[role.template]
-caveat = ["sub"]
 "#;
 
     #[test]
     fn req_caveat_contract_is_sealed_and_drift_is_diffed() {
-        // The declared contract is part of the attested surface: it MACs
-        // into the seal and a host that drifts its local declaration is
-        // flagged, so request-time enforcement runs against the sealed
-        // requirement, not a mutable local one.
+        // The caveat manifest, derived from the template, is part of the
+        // sealed surface: it MACs into the seal and a host whose template
+        // drifts to a different manifest is flagged, so request-time
+        // enforcement runs against the sealed requirement.
         let kr = Keyring::single([7u8; 32]);
         let cfg = parse_for_test(
             CONTRACT_TOML,
@@ -646,37 +632,36 @@ caveat = ["sub"]
         assert!(seal.roles["coord-rw"].attested.is_empty());
         assert!(seal.diff_against_config(&cfg).is_empty());
 
-        // Drop the declaration locally: same templates, different contract
-        // → the seal no longer matches the config.
-        let drifted = parse_for_test(
-            &CONTRACT_TOML.replace("caveat = [\"sub\"]\n", ""),
-            &[("coord-rw.json", r#"{"r":"c/{{caveat.sub}}/*"}"#)],
-        )
-        .expect("parse");
+        // Drift the template to drop the {{caveat.sub}} binding: the derived
+        // manifest changes, so the seal no longer matches the config.
+        let drifted =
+            parse_for_test(CONTRACT_TOML, &[("coord-rw.json", r#"{"r":"c/*"}"#)]).expect("parse");
         let diffs = seal.diff_against_config(&drifted);
-        assert_eq!(diffs.len(), 1, "diffs: {diffs:?}");
-        assert!(diffs[0].contains("caveat contract"), "diff: {:?}", diffs);
+        assert!(
+            diffs.iter().any(|d| d.contains("caveat contract")),
+            "diff: {diffs:?}"
+        );
     }
 
     #[test]
-    fn holder_contract_is_sealed_and_drift_is_diffed() {
-        // The holder source-contract is sealed alongside caveat (a
-        // provenance-downgrade defence): it MACs into the seal, and a host
-        // that drops its local holder declaration is flagged.
+    fn attested_contract_is_sealed_and_drift_is_diffed() {
+        // The attested contract — the non-reserved caveats — is derived from
+        // the template and sealed alongside the manifest; a host whose
+        // template drifts to a different attested set is flagged.
         let kr = Keyring::single([7u8; 32]);
         let toml = r#"
 audience = "mint"
 [store]
 bucket = "demo-bucket"
+[attestation]
+location = "https://a.example/v1/discharge"
 [[role]]
 name = "coord-rw"
 min_ttl_seconds = 60
 max_ttl_seconds = 3600
 default_ttl_seconds = 3600
 policy_file = "coord-rw.json"
-[role.template]
-caveat = ["bucket", "sub"]
-holder = ["bucket"]
+intermediate_ttl_seconds = 0
 "#;
         let cfg = parse_for_test(
             toml,
@@ -687,22 +672,24 @@ holder = ["bucket"]
         )
         .expect("parse");
         let seal = Seal::build_from_config(&cfg, &kr, "t");
-        assert_eq!(seal.roles["coord-rw"].holder, vec!["bucket".to_string()]);
+        assert_eq!(seal.roles["coord-rw"].attested, vec!["bucket".to_string()]);
         assert!(seal.diff_against_config(&cfg).is_empty());
 
-        // Drop the holder declaration locally: same caveat manifest and
-        // templates, different source contract → the seal no longer matches.
+        // Drift the template to bind a different non-reserved caveat: the
+        // sealed attested set (and manifest) no longer matches.
         let drifted = parse_for_test(
-            &toml.replace("holder = [\"bucket\"]\n", ""),
+            toml,
             &[(
                 "coord-rw.json",
-                r#"{"r":"{{caveat.bucket}}/{{caveat.sub}}/*"}"#,
+                r#"{"r":"{{caveat.region}}/{{caveat.sub}}/*"}"#,
             )],
         )
         .expect("parse");
         let diffs = seal.diff_against_config(&drifted);
-        assert_eq!(diffs.len(), 1, "diffs: {diffs:?}");
-        assert!(diffs[0].contains("holder contract"), "diff: {:?}", diffs);
+        assert!(
+            diffs.iter().any(|d| d.contains("attested contract")),
+            "diff: {diffs:?}"
+        );
     }
 
     #[test]

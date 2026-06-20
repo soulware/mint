@@ -71,10 +71,10 @@ pub(crate) struct AttestRequest {
     /// Decrypted under `K_M-B` to recover the discharge key `r` and the
     /// bound `(client_id, org_id, role)`.
     pub(crate) cid: String,
-    /// The `(name, value)` pairs the discharge is to attest — the names
-    /// the role bakes at exchange and its policy template substitutes as
-    /// `{{caveat.X}}`.
-    pub(crate) attested: BTreeMap<String, String>,
+    /// The `(name, value)` pairs the discharge is to attest — every
+    /// non-reserved caveat the role's template substitutes as `{{caveat.X}}`,
+    /// proposed by the client and vouched into the discharge.
+    pub(crate) caveats: BTreeMap<String, String>,
 }
 
 /// Build the attestation-authority router. The caller binds it to its
@@ -110,15 +110,12 @@ async fn issue_discharge(
         Ok(r) => r,
         Err(_) => return error(StatusCode::BAD_REQUEST, "bad request"),
     };
-    // An empty attestation is allowed: a gate-only role (empty `attested`
-    // contract) discharges its TPC to prove the authority vouched, but
-    // bakes no value — the discharge then carries only its `exp`.
-    // Each authority emits only its own vocabulary: a requested name
-    // that collides with a reserved control-caveat name is refused, so
-    // an attestation discharge can never carry the primary's control
-    // set (`sub`, `exp`, …) as attested data.
+    // Each authority emits only its own vocabulary: a requested name that
+    // collides with a reserved control-caveat name is refused, so an
+    // attestation discharge can never carry the primary's control set
+    // (`sub`, `exp`, …) as attested data.
     if req
-        .attested
+        .caveats
         .keys()
         .any(|n| name::RESERVED.contains(&n.as_str()))
     {
@@ -141,7 +138,7 @@ async fn issue_discharge(
 
     let exp = now_unix + DISCHARGE_EXP_SECONDS;
     let mut caveats: Vec<Caveat> = req
-        .attested
+        .caveats
         .iter()
         .map(|(n, v)| Caveat::scalar(n.as_str(), v.as_str()))
         .collect();

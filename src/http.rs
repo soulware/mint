@@ -87,18 +87,14 @@ struct AssumeRoleBody {
     ttl_seconds: Option<u64>,
 }
 
-/// `/v1/enroll-exchange` body — `{ts, role, caveats}`. `ts` is handled by
-/// the PoP machinery (it signs the whole body); `role` is the role this
-/// exchange mints a credential for; `caveats` are the holder-supplied
-/// `(name, value)` pairs the role's sealed `holder` contract permits, baked
-/// verbatim into the credential. All three are authenticated by that same
-/// PoP signature. `caveats` defaults to empty — a role declaring no holder
-/// source takes none.
+/// `/v1/enroll-exchange` body — `{ts, role}`. `ts` is handled by the PoP
+/// machinery (it signs the whole body); `role` is the role this exchange
+/// mints a credential for. Both are authenticated by that same PoP
+/// signature. No caveat values travel here — every non-reserved value is
+/// proposed to the attestation authority and baked at `exchange-finalize`.
 #[derive(Deserialize)]
 struct ExchangeBody {
     role: String,
-    #[serde(default)]
-    caveats: std::collections::BTreeMap<String, String>,
 }
 
 fn respond(request_id: &str, status: StatusCode, body: serde_json::Value) -> Response {
@@ -1110,53 +1106,21 @@ async fn enroll_exchange(
             return unauthorized(&request_id);
         }
     };
-    let Some(sealed_role) = surface.role(&exch.role) else {
+    if surface.role(&exch.role).is_none() {
         audit("denied:unknown_role", &caveats, "");
         return unauthorized(&request_id);
-    };
+    }
     let role = exch.role.clone();
 
-    // Resolve the holder-source caveats against the role's **sealed**
-    // `holder` contract (the provenance pin, not the live config). Every
-    // declared holder name must be present in the body and no name outside
-    // the contract may ride along: a holder cannot smuggle in an extra
-    // caveat or omit a required one. These bake verbatim into the
-    // credential — mint vouches only that they were holder-asserted, the
-    // deployment's IAM account boundary contains their scope. Fail closed
-    // on either divergence with a clean 400 (the role is known; the request
-    // is malformed).
-    let mut baked: Vec<issuance::BakedCaveat> = Vec::with_capacity(sealed_role.holder.len());
-    for n in &sealed_role.holder {
-        match exch.caveats.get(n) {
-            Some(v) => baked.push(issuance::BakedCaveat::new(n.clone(), v.clone())),
-            None => {
-                audit("denied:missing_holder", &caveats, &role);
-                return respond(
-                    &request_id,
-                    StatusCode::BAD_REQUEST,
-                    json!({"error": "bad request"}),
-                );
-            }
-        }
-    }
-    if exch.caveats.keys().any(|k| !sealed_role.holder.contains(k)) {
-        audit("denied:unexpected_holder", &caveats, &role);
-        return respond(
-            &request_id,
-            StatusCode::BAD_REQUEST,
-            json!({"error": "bad request"}),
-        );
-    }
-
-    // Operator authority is exercised at the enroll/exchange gates above,
-    // never at `assume-role`. A role that declares `[role.attestation]`
-    // (`docs/design-mint.md` § *Attestation contract*) does not get its
-    // credential here: it gets a short-lived `op=exchange-finalize`
-    // *intermediate* carrying an undischarged attested third-party caveat.
-    // The holder discharges it at the attestation authority and presents
-    // the bundle to `POST /v1/exchange-finalize`, which bakes the attested
-    // values into the credential (step 2). Every other role gets the
-    // uniform key-bound credential directly, with no third-party caveat.
+    // Provenance is uniform: an issuer-only role (its template binds only
+    // reserved caveats) gets its credential here directly, stamped from
+    // root; an attested role (any non-reserved caveat) gets a short-lived
+    // `op=exchange-finalize` *intermediate* carrying an undischarged
+    // attested third-party caveat. No client value is collected here — the
+    // holder proposes every non-reserved value to the attestation authority,
+    // which vouches it into the discharge that `POST /v1/exchange-finalize`
+    // bakes (step 2). Operator authority is exercised at these enroll/
+    // exchange gates, never at `assume-role`.
     let attested_role = state
         .config
         .roles
@@ -1170,7 +1134,7 @@ async fn enroll_exchange(
             &cnf,
             &role,
             rev_epoch,
-            &baked,
+            &[],
         )
     } else {
         // Config load rejects an attestation role without a location,
@@ -1197,10 +1161,9 @@ async fn enroll_exchange(
             location,
         };
         // The intermediate's `exp` comes from the role's configured
-        // `intermediate_ttl_seconds`: `0` (or, defensively, an
-        // attestation role with no ttl) ⟹ no `exp`, an intermediate the
-        // holder keeps and finalizes per-use for its lifetime;
-        // `n > 0` ⟹ an intermediate that expires `n` seconds from now.
+        // `intermediate_ttl_seconds`: `0` ⟹ no `exp`, an intermediate the
+        // holder keeps and finalizes per-use for its lifetime; `n > 0` ⟹ an
+        // intermediate that expires `n` seconds from now.
         let exp = match state
             .config
             .roles
@@ -1218,7 +1181,6 @@ async fn enroll_exchange(
             &role,
             rev_epoch,
             exp,
-            &baked,
             attested,
         )
     };
@@ -1374,32 +1336,12 @@ async fn exchange_finalize(
         }
     };
 
-    // Re-stamp the holder-source caveats carried (MAC'd) on the
-    // intermediate from step 1. They were validated against the sealed
-    // `holder` contract and baked at enroll-exchange; read them back off
-    // the verified intermediate so the final credential carries them
-    // identically to a non-attested role's. The names come from the same
-    // sealed contract, so a drift between step 1 and step 2 fails closed.
-    let interm = EffectiveCaveats::new(cleared.primary.caveats());
-    let mut baked: Vec<issuance::BakedCaveat> = Vec::new();
-    for n in &sealed_role.holder {
-        match interm.resolve(n) {
-            Resolved::Value(v) => baked.push(issuance::BakedCaveat::new(n.clone(), v)),
-            _ => {
-                audit("denied:missing_holder", &caveats, &role);
-                return respond(
-                    &request_id,
-                    StatusCode::BAD_REQUEST,
-                    json!({"error": "bad request"}),
-                );
-            }
-        }
-    }
-
-    // Bake the role's declared attested names from the authority's
-    // discharge. Each must resolve to a single value (fail closed on a
-    // missing one); a gate-only role declares none and bakes nothing.
+    // Bake the role's attested names — every non-reserved caveat — from the
+    // authority's discharge. Each must resolve to a single value, so a
+    // missing or contradictory one fails closed. These are the only values
+    // the credential carries beyond its issuer-stamped control caveats.
     let dis = EffectiveCaveats::new(&cleared.discharge_caveats);
+    let mut baked: Vec<issuance::BakedCaveat> = Vec::with_capacity(sealed_role.attested.len());
     for n in &sealed_role.attested {
         match dis.resolve(n) {
             Resolved::Value(v) => baked.push(issuance::BakedCaveat::new(n.clone(), v)),

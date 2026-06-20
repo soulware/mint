@@ -77,8 +77,8 @@ Client side (the client's half; identity under `./mint_client`):
 ```sh
 mint client fingerprint                         # mints identity on first use; operator compares this during approve
 mint client enroll  --id <sub> <invite>         # attenuates the invite with sub+cnf
-mint client exchange [--attest N=V] <role>      # exits 2 until approved; --attest for an attested role (baked in here)
-mint client assume-role [--req '{...}'] [--caveat N=V] <role>   # no attestation here — the credential is a bare primary
+mint client exchange [--caveat N=V] <role>      # exits 2 until approved; --caveat proposes attested values (vouched at finalize)
+mint client assume-role [--req '{...}'] <role>  # the credential is a bare primary
 ```
 
 The **hermetic** shape (no cloud) is the `mint-e2e` harness bin: the same `serve::run` loop over
@@ -133,28 +133,34 @@ enrollments; outstanding primaries are unaffected.
 + PoP → role gate → handlebars policy render → Tigris keypair. **No attestation runs here** — the
 credential is a bare primary.
 
-**Attestation is point-in-time, at exchange.** A role declaring `[role.attestation]` exchanges in
-two steps: `POST /v1/enroll-exchange` returns an `op=exchange-finalize` *intermediate*
-carrying an undischarged attested third-party caveat; the client discharges it at the attestation
-authority and `POST /v1/exchange-finalize` **bakes** the attested values into the credential as
-ordinary MAC'd caveats. The intermediate's lifetime is the role's required
-`[role.attestation].intermediate_ttl_seconds`: `0` ⟹ no `exp`, so the holder keeps it and finalizes
-per-use (e.g. a coordinator minting a credential per volume); `n > 0` ⟹ it expires after `n` seconds
-(a single back-to-back finalize). Thereafter they are indistinguishable from the issuer-stamped `sub` and
-render as `{{caveat.X}}` (there is no `{{attested.X}}` namespace). The attested names are declared
-in `[role.attestation].attested` and must be a **subset of** `[role.template].caveat`; an empty
-list is a gate-only role (a discharge is still required to finalize, but no value is baked). The
-demo attestation authority is **echo-only** — real plumbing (`K_M-B`, an `r`-bound discharge), but
-the verdict is stubbed to "approve whatever value is asked"; a production authority derives or
-validates the value from `(sub, role)` (the attested caveat's CID seals the role name for it).
+**Provenance is derived, not declared (`docs/design-always-attest.md`).** A `{{caveat.X}}` value is
+one of two things: **issuer-stamped** (a reserved name like `sub`, set by mint) or **attested** (any
+other name — the caller proposes it and an authority vouches it). A role binding **any** non-reserved
+caveat is *attested*; a role binding only reserved caveats is *issuer-only*. There is no separate
+holder-supplied source and nothing to declare per caveat — the manifest, attested set, and issuer set
+are all derived from the template (`config::from_raw` via `template::template_surface`, partitioned by
+`caveat::name::RESERVED`).
+
+**Attestation is point-in-time, at exchange.** An attested role exchanges in two steps:
+`POST /v1/enroll-exchange` returns an `op=exchange-finalize` *intermediate* carrying an undischarged
+attested third-party caveat (no values); the client proposes every non-reserved value to the
+attestation authority, discharges the TPC, and `POST /v1/exchange-finalize` **bakes** the vouched
+values into the credential as ordinary MAC'd caveats. The intermediate's lifetime is the role's
+required top-level `intermediate_ttl_seconds`: `0` ⟹ no `exp`, so the holder keeps it and finalizes
+per-use (e.g. a coordinator minting a credential per volume); `n > 0` ⟹ it expires after `n` seconds.
+Baked values are indistinguishable from the issuer-stamped `sub` and render as `{{caveat.X}}` (there is
+no `{{attested.X}}` namespace). An issuer-only role exchanges in one step with no authority. The demo
+attestation authority is **echo-only** — real plumbing (`K_M-B`, an `r`-bound discharge), but the
+verdict is stubbed to "approve whatever value is asked"; a production authority derives or validates
+the value from `(sub, role)` (the attested caveat's CID seals the role name for it).
 
 ### Module map
 - `caveat` / `macaroon` — the caveat algebra and wire format (above).
 - `pop` — the holder-of-key gate.
-- `issuance` — `mint_invite` / `mint_credential_ticket` / `mint_intermediate` (attested step 1) /
-  `mint_credential` (the primary; bakes the credential's source-stamped caveats — holder-supplied
-  values fixed at exchange and, for attested roles, the discharged attested values) — each a
-  fresh chain from root — plus `mint_admin_service_token`, `bound_identity`.
+- `issuance` — `mint_invite` / `mint_credential_ticket` / `mint_intermediate` (attested step 1, no
+  values) / `mint_credential` (the primary; for an attested role bakes the discharged attested
+  values, for an issuer-only role just the issuer-stamped caveats) — each a fresh chain from root —
+  plus `mint_admin_service_token`, `bound_identity`.
 - `keyring` — the **root-key keyring**: ordered `(kid, key)` generations + a `current` pointer.
   Verification accepts any kid still in the ring; minting always uses `current`. Stored as a
   directory of numbered files (`<data_dir>/root_keys/0000`, `…/current`) — `ls`-inspectable.
@@ -169,9 +175,9 @@ validates the value from `(sub, role)` (the attested caveat's CID seals the role
   `TemplateSet` — the request path never re-reads disk. `SealState` is `Serving` or `Dormant`,
   held in an `ArcSwap` so `mint seal` swaps the served surface live, no restart.
 - `role` / `template` / `audit` — role gate, handlebars policy render, JSON audit lines. A policy
-  template substitutes values from two namespaces: `{{caveat.X}}` (MAC-verified — issuer-stamped,
-  holder-supplied, or attestation-baked) and `{{mint.X}}` (mint-computed). A deployment constant is
-  an inlined literal, not a token.
+  template substitutes values from two namespaces: `{{caveat.X}}` (MAC-verified — issuer-stamped or
+  attestation-baked) and `{{mint.X}}` (mint-computed). A deployment constant is an inlined literal,
+  not a token.
 - `config` — TOML (audience, `data_dir`, `roles_dir`, tenant, per-role metadata). Each role's
   policy template is a separate file under `roles_dir` (`<name>.json`, or `policy_file`). The
   macaroon root key is **not** config. Admin credential from `AWS_*`, never TOML.
