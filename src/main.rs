@@ -160,6 +160,9 @@ enum ClientCmd {
         /// Defaults to `credentials/<role>`.
         #[arg(long = "in")]
         in_file: Option<String>,
+        /// Client-side upper bound: the `exp` attenuated onto the credential
+        /// before presenting. The grant is `min(role ttl_seconds, this)`, so
+        /// it only ever shortens the role's sealed lifetime, never extends it.
         #[arg(long, default_value_t = 900)]
         ttl: u64,
         /// Role name from the mint config.
@@ -182,13 +185,13 @@ enum CredentialCmd {
 
 #[derive(Subcommand)]
 enum RoleCmd {
-    /// List roles: name, TTL bounds, and each role's state relative to
+    /// List roles: name, `ttl_seconds`, and each role's state relative to
     /// the served seal (served / drifted / unsealed).
     List {
         #[arg(long, env = "MINT_CONFIG", default_value = "mint.toml")]
         config: PathBuf,
     },
-    /// Show one role from the served seal: TTL bounds, policy source, the
+    /// Show one role from the served seal: `ttl_seconds`, policy source, the
     /// served policy template + its substitution surface, and any drift of
     /// the local config from the seal.
     Inspect {
@@ -761,10 +764,7 @@ fn role_list(config: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // drifted, since it changes the audience each grant is stamped with.
     let global_drift = served.is_some_and(|(s, _)| s.audience != config.audience);
 
-    println!(
-        "{:<24} {:>7} {:>7} {:>7}  STATE",
-        "NAME", "MIN", "DEF", "MAX"
-    );
+    println!("{:<24} {:>9}  STATE", "NAME", "TTL");
     // config.roles is a BTreeMap, so iteration is name-sorted.
     for r in config.roles.values() {
         let row = served
@@ -772,26 +772,14 @@ fn role_list(config: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 let sealed = seal.roles.get(&r.name)?;
                 templates.get(&r.name)?;
                 let drifted = global_drift
-                    || sealed.min_ttl_seconds != r.min_ttl_seconds
-                    || sealed.default_ttl_seconds != r.default_ttl_seconds
-                    || sealed.max_ttl_seconds != r.max_ttl_seconds
+                    || sealed.ttl_seconds != r.ttl_seconds
                     || sealed.policy_blake3 != mint::seal::hash_hex(r.policy.as_bytes());
                 let state = if drifted { "drifted" } else { "served" };
-                Some((
-                    sealed.min_ttl_seconds,
-                    sealed.default_ttl_seconds,
-                    sealed.max_ttl_seconds,
-                    state,
-                ))
+                Some((sealed.ttl_seconds, state))
             })
-            .unwrap_or((
-                r.min_ttl_seconds,
-                r.default_ttl_seconds,
-                r.max_ttl_seconds,
-                "unsealed",
-            ));
-        let (min, def, max, state) = row;
-        println!("{:<24} {min:>7} {def:>7} {max:>7}  {state}", r.name);
+            .unwrap_or((r.ttl_seconds, "unsealed"));
+        let (ttl, state) = row;
+        println!("{:<24} {ttl:>9}  {state}", r.name);
     }
     Ok(())
 }
@@ -831,13 +819,9 @@ fn role_inspect(config: &Path, name: &str) -> Result<(), Box<dyn std::error::Err
                     }
                 };
                 eprintln!(
-                    "  ttl_seconds:      min={}{} default={}{} max={}{}",
-                    sealed.min_ttl_seconds,
-                    drift(sealed.min_ttl_seconds, role.min_ttl_seconds),
-                    sealed.default_ttl_seconds,
-                    drift(sealed.default_ttl_seconds, role.default_ttl_seconds),
-                    sealed.max_ttl_seconds,
-                    drift(sealed.max_ttl_seconds, role.max_ttl_seconds),
+                    "  ttl_seconds:      {}{}",
+                    sealed.ttl_seconds,
+                    drift(sealed.ttl_seconds, role.ttl_seconds),
                 );
                 if seal.audience == config.audience {
                     eprintln!("  audience:         {}", seal.audience);
@@ -916,8 +900,8 @@ fn print_policy_surface(template: &str) {
 fn print_unsealed_role(role: &mint::config::Role, why: &str) {
     eprintln!("  surface:          NOT SEALED \u{2014} {why}");
     eprintln!(
-        "  ttl_seconds:      min={} default={} max={}  (local, unsealed)",
-        role.min_ttl_seconds, role.default_ttl_seconds, role.max_ttl_seconds
+        "  ttl_seconds:      {}  (local, unsealed)",
+        role.ttl_seconds
     );
     print_policy_surface(&role.policy);
     eprintln!("  policy template (local draft):");

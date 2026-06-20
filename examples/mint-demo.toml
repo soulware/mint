@@ -10,8 +10,8 @@
 # the mint-computed `{{mint.expiry}}`.
 #
 # The per-role policy templates live under roles_dir (examples/demo_roles/).
-# Provenance is derived from the template — there is nothing to declare. A
-# true deployment constant is written into the policy JSON as a literal.
+# Provenance is derived from the template. A true deployment constant is
+# written into the policy JSON as a literal.
 #
 # `mint serve` always talks to a real S3-compatible backend (Tigris,
 # MinIO, AWS). Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY in the
@@ -71,14 +71,14 @@ bucket = "mint-demo"
 
 # A policy template pulls from two namespaces — `{{caveat.X}}` (MAC-verified)
 # and `{{mint.X}}` (mint-computed) — plus literal text for true deployment
-# constants. A `{{caveat.X}}` value reaches the credential by one of three
-# provenances, declared per role:
-#   - issuer-stamped       — mint sets it from the principal (e.g. `sub`).
-#   - holder-supplied      — the client fixes it at exchange (`--caveat X=V`),
-#                            listed in `holder` (⊆ `caveat`).
-#   - attestation-sourced  — an authority vouches for it at finalize
-#                            (`--attest X=V`), listed in `attested` (⊆ `caveat`).
-# The two roles below together exercise all three.
+# constants. A `{{caveat.X}}` value reaches the credential by one of two
+# provenances, derived from the name:
+#   - issuer-stamped — a reserved name (e.g. `sub`) mint sets from the
+#                      principal.
+#   - attested       — any other name: the caller proposes it at exchange
+#                      (`--caveat X=V`) and the attestation authority vouches
+#                      it before it bakes in.
+# The two roles below cover both.
 
 # `demo` — issuer-only. Its template binds only the reserved, issuer-stamped
 # `sub`, so it needs no attestation authority and exchanges in one step. The
@@ -87,12 +87,9 @@ bucket = "mint-demo"
 #   mint client exchange demo
 [[role]]
 name = "demo"
-min_ttl_seconds = 60
-max_ttl_seconds = 3600
-default_ttl_seconds = 900
-# Nothing to declare: provenance is derived from the template. The policy's
-# only `{{caveat.X}}` is `sub` (reserved ⟹ issuer-stamped); the bucket is a
-# literal in the template.
+# Credential lifetime in seconds, clamped to the `exp` the caller attenuated
+# onto its credential — a caller can ask for less, never more.
+ttl_seconds = 900
 
 # `demo-attested` — attested. Its template binds the non-reserved `bucket`
 # and `project`; the caller proposes both at exchange and the attestation
@@ -101,12 +98,7 @@ default_ttl_seconds = 900
 #   mint client exchange --caveat bucket=acme-data --caveat project=apollo demo-attested
 [[role]]
 name = "demo-attested"
-min_ttl_seconds = 60
-max_ttl_seconds = 900
-default_ttl_seconds = 300
-# Required because this role is attested (its template binds non-reserved
-# caveats). `0` ⟹ the intermediate carries no `exp`: the holder keeps it and
-# finalizes per-use for its lifetime (e.g. a coordinator minting a credential
-# per volume). A positive value (e.g. 600) bounds it to a single back-to-back
-# finalize.
-intermediate_ttl_seconds = 0
+ttl_seconds = 300
+# Attested roles exchange via a durable (no-`exp`) intermediate that the
+# holder finalizes per-use — e.g. a coordinator minting a credential per
+# volume.

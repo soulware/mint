@@ -54,16 +54,11 @@ location = "https://auth.example/v1/discharge"
 location = "https://coord-b.example/v1/discharge"
 [[role]]
 name = "volume-ro"
-min_ttl_seconds = 60
-max_ttl_seconds = 2592000
-default_ttl_seconds = 2592000
+ttl_seconds = 2592000
 policy_file = "volume-ro.json"
-intermediate_ttl_seconds = 0
 [[role]]
 name = "volume-rw"
-min_ttl_seconds = 60
-max_ttl_seconds = 3600
-default_ttl_seconds = 900
+ttl_seconds = 900
 policy_file = "volume-rw.json"
 "#;
 
@@ -317,8 +312,8 @@ async fn full_flow_enroll_approve_exchange_then_assume_role() {
 
     // (4) exchange the attested `volume-ro` role → the intermediate
     // (op=exchange-finalize) carrying the volume attested TPC, step 1 of
-    // two. The role sets `intermediate_ttl_seconds = 0`, so the intermediate
-    // carries no `exp`: the holder keeps it and finalizes per-volume.
+    // two. The intermediate carries no `exp`: it is durable, so the holder
+    // keeps it and finalizes per-volume.
     let (status, body) = parts(
         app.clone()
             .oneshot(signed(
@@ -346,7 +341,7 @@ async fn full_flow_enroll_approve_exchange_then_assume_role() {
     assert_eq!(
         EffectiveCaveats::new(intermediate.caveats()).min_bound(name::EXP),
         None,
-        "intermediate_ttl_seconds = 0 ⟹ the intermediate carries no exp"
+        "the durable intermediate carries no exp"
     );
 
     // (4b) finalize → the credential, with the attested volume baked in as
@@ -433,7 +428,7 @@ async fn full_flow_enroll_approve_exchange_then_assume_role() {
             "/v1/assume-role",
             &req,
             &CLIENT_SEED,
-            r#","role":"volume-ro","ttl_seconds":3600"#,
+            r#","role":"volume-ro""#,
         ))
         .await
         .unwrap(),
@@ -954,9 +949,9 @@ fn signed_finalize(m: &Macaroon, seed: &[u8; 32], volume: &str) -> Request<Body>
 }
 
 /// Run enroll → approve → enroll-exchange for the attested `volume-ro` role
-/// and return its `op=exchange-finalize` intermediate. The role sets
-/// `intermediate_ttl_seconds = 0`, so the intermediate carries no `exp` —
-/// the holder keeps it and finalizes per-volume.
+/// and return its `op=exchange-finalize` intermediate. The intermediate
+/// carries no `exp` — it is durable, so the holder keeps it and finalizes
+/// per-volume.
 async fn volume_ro_intermediate(app: &axum::Router, store: &Store) -> Macaroon {
     let nonce = store.current_invite().await.unwrap();
     let cb = client_invite(&nonce, &CLIENT_SEED);
@@ -1075,7 +1070,7 @@ async fn durable_intermediate_is_not_usable_at_assume_role() {
                 "/v1/assume-role",
                 &intermediate,
                 &CLIENT_SEED,
-                r#","role":"volume-ro","ttl_seconds":3600"#,
+                r#","role":"volume-ro""#,
             ))
             .await
             .unwrap(),

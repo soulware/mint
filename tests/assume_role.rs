@@ -43,11 +43,8 @@ bucket = "demo-bucket"
 location = "https://coord-b.example/v1/discharge"
 [[role]]
 name = "volume-ro"
-min_ttl_seconds = 60
-max_ttl_seconds = 2592000
-default_ttl_seconds = 2592000
+ttl_seconds = 2592000
 policy_file = "volume-ro.json"
-intermediate_ttl_seconds = 0
 "#;
 
 const POLICY: &str = r#"
@@ -192,7 +189,7 @@ async fn happy_path_mints_scoped_keypair() {
     let app = router(state);
     let m = request_macaroon();
 
-    let req = signed_request(&m, r#""role":"volume-ro","ttl_seconds":3600"#);
+    let req = signed_request(&m, r#""role":"volume-ro""#);
     let (status, body) = body_string(app.oneshot(req).await.unwrap()).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert!(body.contains("tid_fake_00000000"), "body: {body}");
@@ -237,7 +234,7 @@ async fn missing_caveat_value_is_rejected_before_render() {
     let app = router(state);
     let m = request_macaroon_without_volume();
 
-    let req = signed_request(&m, r#""role":"volume-ro","ttl_seconds":3600"#);
+    let req = signed_request(&m, r#""role":"volume-ro""#);
     let (status, body) = body_string(app.oneshot(req).await.unwrap()).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
     // Nothing was minted, and the contract check (not render) is what
@@ -404,10 +401,7 @@ async fn revoked_credential_is_401() {
     let app = router(state);
     let m = request_macaroon();
 
-    let req = signed_request(
-        &m,
-        &format!(r#""role":"volume-ro","ttl_seconds":3600,"volume":"{VOLUME}""#),
-    );
+    let req = signed_request(&m, &format!(r#""role":"volume-ro","volume":"{VOLUME}""#));
     let (status, body) = body_string(app.clone().oneshot(req).await.unwrap()).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
 
@@ -416,10 +410,7 @@ async fn revoked_credential_is_401() {
         .await
         .expect("revoke");
 
-    let req = signed_request(
-        &m,
-        &format!(r#""role":"volume-ro","ttl_seconds":3600,"volume":"{VOLUME}""#),
-    );
+    let req = signed_request(&m, &format!(r#""role":"volume-ro","volume":"{VOLUME}""#));
     let (status, _) = body_string(app.oneshot(req).await.unwrap()).await;
     assert_eq!(
         status,
@@ -454,10 +445,7 @@ async fn re_approval_after_revoke_does_not_revive_old_credential() {
         .await
         .expect("re-approve");
 
-    let req = signed_request(
-        &old,
-        &format!(r#""role":"volume-ro","ttl_seconds":3600,"volume":"{VOLUME}""#),
-    );
+    let req = signed_request(&old, &format!(r#""role":"volume-ro","volume":"{VOLUME}""#));
     let (status, _) = body_string(app.clone().oneshot(req).await.unwrap()).await;
     assert_eq!(
         status,
@@ -466,7 +454,7 @@ async fn re_approval_after_revoke_does_not_revive_old_credential() {
     );
 
     let fresh = request_macaroon_at_epoch(1);
-    let req = signed_request(&fresh, r#""role":"volume-ro","ttl_seconds":3600"#);
+    let req = signed_request(&fresh, r#""role":"volume-ro""#);
     let (status, body) = body_string(app.oneshot(req).await.unwrap()).await;
     assert_eq!(
         status,
@@ -498,7 +486,7 @@ async fn dormant_closes_assume_role_and_readiness() {
     // assume-role: the seal gate fires before authentication, so even an
     // otherwise-valid request gets 503 not-sealed (never mints a keypair).
     let m = request_macaroon();
-    let req = signed_request(&m, r#""role":"volume-ro","ttl_seconds":3600"#);
+    let req = signed_request(&m, r#""role":"volume-ro""#);
     let (status, body) = body_string(app.clone().oneshot(req).await.unwrap()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body: {body}");
     assert!(body.contains("not sealed"), "body: {body}");

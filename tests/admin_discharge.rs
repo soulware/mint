@@ -71,9 +71,7 @@ location = "https://auth.example/v1/discharge"
 enabled = true
 [[role]]
 name = "volume-rw"
-min_ttl_seconds = 60
-max_ttl_seconds = 3600
-default_ttl_seconds = 900
+ttl_seconds = 900
 policy_file = "volume-rw.json"
 tpc = { location = "https://auth.example/v1/discharge" }
 "#;

@@ -92,32 +92,27 @@ After:
 ```toml
 [[role]]
 name = "demo-attested"
-min_ttl_seconds = 60
-max_ttl_seconds = 900
-default_ttl_seconds = 300
-# Required because this role is attested (its template binds a non-reserved
-# caveat). Sits beside the ttl bounds; `0` ⟹ a durable intermediate the holder
-# finalizes per-use, `n > 0` ⟹ one that expires after n seconds.
-intermediate_ttl_seconds = 0
+ttl_seconds = 300
+# Attested roles exchange via a durable (no-`exp`) intermediate the holder
+# finalizes per-use — e.g. a coordinator minting a credential per volume.
 # policy_file defaults to demo-attested.json — bucket and project are attested
 # (non-reserved); sub is issuer (reserved).
 ```
 
-There is no `[role.attestation]` subtable any more. `mode` and the `attested`
-list were already derived; the only remaining knob,
-`intermediate_ttl_seconds`, moves up beside the ttl bounds. A role is now just
-its `name`, four ttl-shaped numbers, and a policy file. An issuer-only role
-omits `intermediate_ttl_seconds` — it has no intermediate.
+There is no `[role.attestation]` subtable any more, and no per-role TTL knobs
+beyond a single `ttl_seconds`. `mode` and the `attested` list were already
+derived; the credential's lifetime is one `ttl_seconds` (the grant is that,
+clamped to the macaroon's own `exp` — a holder attenuates `exp` to ask for
+less), and the intermediate is always durable, so there is no
+`intermediate_ttl_seconds`. A role is now just its `name`, a single
+`ttl_seconds`, and a policy file.
 
 Validation at config load:
 
-- a role that binds ≥1 non-reserved caveat is **attested**: it requires both
-  `intermediate_ttl_seconds` (explicit, no default) and a configured
-  `attestation.location`. Either missing → **fail closed at load** (the latter
-  via today's `AttestationWithoutLocation`, now reachable whenever the template
+- a role that binds ≥1 non-reserved caveat is **attested**: it requires a
+  configured `attestation.location`. Missing → **fail closed at load** (via
+  today's `AttestationWithoutLocation`, now reachable whenever the template
   carries a non-reserved caveat).
-- an issuer-only role must **not** set `intermediate_ttl_seconds` — it has no
-  intermediate to bound; a stray value is a load error, not a silent no-op.
 - the `caveat`/`holder`/`attested`/source-conflict cross-checks are deleted:
   there is nothing left to reconcile, because the manifest *is* the template
   (`template::template_surface`) and the partition is `RESERVED` membership.
@@ -248,10 +243,12 @@ The costs are real:
 
 1. **No-authority caveat role → load error.** Settled: yes, fail closed — a
    caveat-bearing role with no `attestation.location` is rejected at load.
-2. **`intermediate_ttl_seconds` is required and explicit**, placed at the top
-   of the role beside `min`/`max`/`default_ttl_seconds` — not defaulted, not in
-   a subtable. The intermediate's lifetime stays a visible choice (`0` ⟹
-   durable, finalize-per-use; `n > 0` ⟹ expires after n seconds).
+2. **A single per-role `ttl_seconds`; the intermediate is always durable.**
+   The credential's lifetime collapses from `min`/`max`/`default_ttl_seconds`
+   to one required `ttl_seconds`, with no request-body override — a holder
+   attenuates its macaroon's `exp` to ask for less. The attested intermediate
+   carries no `exp` and is finalized per-use, so there is no
+   `intermediate_ttl_seconds` knob.
 3. **Gate-only roles are removed.** Attestation exists to vouch values; a role
    with no non-reserved caveat has nothing to attest and runs issuer-only.
    Removing this case is what lets the `[role.attestation]` subtable disappear.
@@ -270,9 +267,13 @@ A sensible sequence:
 2. **Derive provenance from the template.** Delete `[role.template]` and the
    `holder`/`attested` declarations; derive issuer/attested from `RESERVED`
    membership over the template tokens. Remove the `[role.attestation]`
-   subtable and gate-only roles; `intermediate_ttl_seconds` becomes a required
-   top-level field on attested roles. Update the seal surface (drop `holder`).
-3. **Demo, config, and docs.** Replace the colocated `attest.sock` stub with
+   subtable and gate-only roles. Update the seal surface (drop `holder`).
+3. **Collapse the TTL surface.** Replace `min`/`max`/`default_ttl_seconds` and
+   the request-body override with a single per-role `ttl_seconds`; drop
+   `intermediate_ttl_seconds` and make the attested intermediate always
+   durable. The seal pins `ttl_seconds`; `authorize` grants it clamped to the
+   presented macaroon's `exp`.
+4. **Demo, config, and docs.** Replace the colocated `attest.sock` stub with
    the in-process do-nothing discharge (drop demo `K_M-B`); rewrite the demo
    roles (issuer-only + attested), the seal/validation, README, and CLAUDE.md
    to the two-provenance vocabulary; keep one separate-authority transport
