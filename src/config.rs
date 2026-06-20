@@ -94,6 +94,21 @@ pub enum ConfigError {
     )]
     AttestedNotInCaveat { role: String, key: String },
     #[error(
+        "role {role}: declared holder name {key:?} collides with a reserved \
+         control-caveat name"
+    )]
+    ReservedHolderKey { role: String, key: String },
+    #[error(
+        "role {role}: [role.template] holder name {key:?} is not in caveat \
+         (holder must be a subset of caveat)"
+    )]
+    HolderNotInCaveat { role: String, key: String },
+    #[error(
+        "role {role}: name {key:?} is declared as both holder-supplied and \
+         attested — a caveat has exactly one source"
+    )]
+    SourceConflict { role: String, key: String },
+    #[error(
         "role {role}: declared caveat names {declared:?} do not match the \
          template's {{{{caveat.X}}}} tokens {used:?}"
     )]
@@ -425,11 +440,20 @@ pub struct RawTemplate {
     /// The `caveat.*` MAC-verified names the template binds — the full
     /// manifest of `{{caveat.X}}` tokens, whatever their provenance:
     /// issuer-stamped control names (e.g. `sub`), holder-supplied
-    /// narrowing values, and the attestation-sourced names baked at
-    /// `exchange-finalize` ([`RawRoleAttestation::attested`], a subset of
-    /// this list). Absent = the empty set.
+    /// values ([`holder`](Self::holder)), and the attestation-sourced names
+    /// baked at `exchange-finalize` ([`RawRoleAttestation::attested`]).
+    /// Each non-issuer name is declared in exactly one of those two
+    /// subsets. Absent = the empty set.
     #[serde(default)]
     pub caveat: Vec<String>,
+    /// The `caveat.*` names the client supplies in the PoP-signed
+    /// `enroll-exchange` body and mint bakes verbatim into the credential
+    /// (provenance `holder`). A subset of [`caveat`](Self::caveat), disjoint
+    /// from [`RawRoleAttestation::attested`] and from the reserved control
+    /// names ([`crate::caveat::name::RESERVED`]) a client may not
+    /// self-assert. Absent = no holder-supplied caveats.
+    #[serde(default)]
+    pub holder: Vec<String>,
 }
 
 /// Resolved listener transport — a per-deployment-shape choice, not a
@@ -587,6 +611,12 @@ pub struct Role {
     /// ([`Config::validate_policy_surface`]) and enforced at request time.
     pub attested: Vec<String>,
     pub caveat: Vec<String>,
+    /// The subset of [`caveat`](Role::caveat) the client supplies in the
+    /// `enroll-exchange` body, baked verbatim into the credential
+    /// (provenance `holder`). Disjoint from [`attested`](Role::attested)
+    /// and from the reserved control names. Sorted and de-duplicated at
+    /// load; sealed into [`crate::seal::SealedRole`].
+    pub holder: Vec<String>,
     /// The role's opaque attestation `mode`, from `[role.attestation]`
     /// (defaulting to the role name) — `None` when the role declares no
     /// attestation. When `Some`, mint stamps an attested third-party
@@ -696,6 +726,31 @@ impl Config {
                     });
                 }
             }
+            // Holder caveats are copied verbatim from the exchange body, so
+            // each must be a declared caveat slot (subset of `caveat`), must
+            // not be a reserved control name a client could self-assert, and
+            // must not also be `attested` — a caveat has exactly one source.
+            let holder = canonical_field_set(r.template.holder);
+            for key in &holder {
+                if crate::caveat::name::RESERVED.contains(&key.as_str()) {
+                    return Err(ConfigError::ReservedHolderKey {
+                        role: r.name.clone(),
+                        key: key.clone(),
+                    });
+                }
+                if attested.contains(key) {
+                    return Err(ConfigError::SourceConflict {
+                        role: r.name.clone(),
+                        key: key.clone(),
+                    });
+                }
+                if !caveat.contains(key) {
+                    return Err(ConfigError::HolderNotInCaveat {
+                        role: r.name.clone(),
+                        key: key.clone(),
+                    });
+                }
+            }
             let role = Role {
                 name: r.name.clone(),
                 min_ttl_seconds: r.min_ttl_seconds,
@@ -705,6 +760,7 @@ impl Config {
                 policy,
                 attested,
                 caveat,
+                holder,
                 attestation_mode,
                 intermediate_ttl_seconds,
             };
@@ -843,12 +899,13 @@ impl Config {
                     });
                 }
             }
-            // The attested↔caveat fencing (subset, reserved-name disjoint)
+            // The attested/holder↔caveat fencing (each a subset of caveat,
+            // disjoint from each other and from the reserved control names)
             // is enforced at config load; what seal authoring adds is the
             // template cross-check: the policy's `{{caveat.X}}` tokens must
             // exactly match the declared caveat manifest (which includes the
-            // attested subset). `{{attested.X}}` is no longer a namespace —
-            // a stray one is caught earlier as a malformed token.
+            // attested and holder subsets). `{{attested.X}}` is no longer a
+            // namespace — a stray one is caught earlier as a malformed token.
             //
             // `template_surface` returns each bucket sorted+deduped, and
             // the declared set is canonicalised the same way at load, so
@@ -1251,6 +1308,85 @@ intermediate_ttl_seconds = 0
         assert!(matches!(
             err,
             Err(ConfigError::AttestedNotInCaveat { key, .. }) if key == "project"
+        ));
+    }
+
+    #[test]
+    fn holder_subset_loads_and_seals() {
+        // A holder caveat is a declared caveat slot the template binds; it
+        // loads, canonicalises into the role, and seals cleanly.
+        let cfg = parse_for_test(
+            &contract_toml("caveat = [\"bucket\", \"sub\"]\nholder = [\"bucket\"]"),
+            &[("r.json", r#"{"r":"{{caveat.bucket}}/{{caveat.sub}}"}"#)],
+        )
+        .expect("parse");
+        cfg.validate_policy_surface().expect("seals");
+        assert_eq!(cfg.roles["r"].holder, vec!["bucket".to_string()]);
+    }
+
+    #[test]
+    fn holder_not_in_caveat_fails_load() {
+        // holder must be a subset of caveat: a holder name that is not a
+        // declared caveat slot is rejected at load.
+        let err = parse_for_test(
+            &contract_toml("caveat = [\"sub\"]\nholder = [\"bucket\"]"),
+            &[("r.json", r#"{"r":"{{caveat.sub}}"}"#)],
+        );
+        assert!(matches!(
+            err,
+            Err(ConfigError::HolderNotInCaveat { key, .. }) if key == "bucket"
+        ));
+    }
+
+    #[test]
+    fn reserved_holder_name_fails_load() {
+        // A client may not self-assert a reserved control caveat: declaring
+        // a reserved name as holder-supplied is rejected at load. Every
+        // reserved name is rejected, not just `sub`.
+        for reserved in crate::caveat::name::RESERVED {
+            let err = parse_for_test(
+                &contract_toml(&format!(
+                    "caveat = [\"{reserved}\"]\nholder = [\"{reserved}\"]"
+                )),
+                &[("r.json", "{}")],
+            );
+            assert!(
+                matches!(
+                    err,
+                    Err(ConfigError::ReservedHolderKey { key, .. }) if key == *reserved
+                ),
+                "reserved holder name {reserved:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn holder_and_attested_conflict_fails_load() {
+        // A caveat has exactly one source: declaring the same name as both
+        // holder-supplied and attested is rejected at load.
+        let toml = r#"
+audience = "mint"
+[store]
+bucket = "state-bucket"
+[attestation]
+location = "https://a.example/v1/discharge"
+[[role]]
+name = "r"
+min_ttl_seconds = 60
+max_ttl_seconds = 100
+default_ttl_seconds = 100
+policy_file = "r.json"
+[role.template]
+caveat = ["region"]
+holder = ["region"]
+[role.attestation]
+attested = ["region"]
+intermediate_ttl_seconds = 0
+"#;
+        let err = parse_for_test(toml, &[("r.json", r#"{"r":"{{caveat.region}}"}"#)]);
+        assert!(matches!(
+            err,
+            Err(ConfigError::SourceConflict { key, .. }) if key == "region"
         ));
     }
 
