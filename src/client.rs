@@ -467,9 +467,9 @@ async fn finalize_attested(
     Ok(credential)
 }
 
-/// A parsed `NAME=VALUE` CLI argument — a narrowing caveat (`assume-role`),
-/// a holder-supplied value (`exchange --caveat`), or a value for the
-/// attestation authority (`exchange --attest`).
+/// A parsed `NAME=VALUE` CLI argument — a holder-supplied value
+/// (`exchange --caveat`) or a value for the attestation authority
+/// (`exchange --attest`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CaveatArg {
     name: String,
@@ -515,20 +515,17 @@ fn build_request_body(role: &str, ttl_seconds: u64, ts: u64) -> String {
     serde_json::Value::Object(obj).to_string()
 }
 
-/// `mint client assume-role`: attenuate the held credential (the
-/// bounding `exp` from `ttl`, plus any caller-supplied narrowing
-/// caveats) and exercise it. The credential is a bare primary — any
-/// attestation was discharged and baked in at exchange — so no discharge
-/// is fetched here. Returns the raw keypair JSON to print.
+/// `mint client assume-role`: attenuate the held credential with the
+/// bounding `exp` from `ttl` and exercise it. The credential is a bare
+/// primary — any attestation was discharged and baked in at exchange — so
+/// no discharge is fetched here. Returns the raw keypair JSON to print.
 pub async fn assume_role(
     dir: &Path,
     base_url: &str,
     role: &str,
-    caveats: &[String],
     ttl_seconds: u64,
     in_file: &str,
 ) -> Result<String, ClientError> {
-    let caveats = parse_caveats(caveats)?;
     let sk = load_key(dir)?;
     let in_path = dir.join(in_file);
     let mut mac = Macaroon::decode(
@@ -544,18 +541,11 @@ pub async fn assume_role(
         in_path.display()
     );
     describe("credential (what you hold)", &mac);
-    // The credential does not expire; the role gate requires `exp`.
-    // Bound it to the requested lifetime, then apply caller narrowing
-    // caveats.
+    // The credential does not expire; the role gate requires `exp`. Bound
+    // it to the requested lifetime.
     let exp = now_unix().saturating_add(ttl_seconds);
     mac = mac.attenuate(Caveat::scalar(name::EXP, exp.to_string()));
-    for c in &caveats {
-        mac = mac.attenuate(Caveat::scalar(c.name.as_str(), c.value.as_str()));
-    }
-    eprintln!(
-        "  appended exp={exp} + {} narrowing caveat(s)",
-        caveats.len()
-    );
+    eprintln!("  appended exp={exp}");
 
     // The credential carries no third-party caveat — any attestation was
     // discharged and baked in at exchange — so `assume-role` presents a

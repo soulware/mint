@@ -54,8 +54,6 @@ Every `{{caveat.X}}` value is MAC-verified on the credential, and each is declar
 * *holder-supplied* — the client fixes it at exchange (`--caveat X=V`)
 * *attestation-sourced* — a third party vouches for it at exchange (`--attest X=V`)
 
-A client may also *attenuate* a credential it already holds, narrowing the policy further at `assume-role` (`--caveat X=V`).
-
 ## Getting Started
 
 Initial configuration, admin key management and running the mint server -
