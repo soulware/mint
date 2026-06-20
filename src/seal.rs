@@ -82,12 +82,6 @@ pub struct SealedRole {
 pub struct Seal {
     pub audience: String,
     pub roles: BTreeMap<String, SealedRole>,
-    /// BLAKE3 of the canonical `[env]` serialisation (see
-    /// [`canonical_env_bytes`]), hex-encoded — the pin for the materialised
-    /// `sealed/env.json`. Binds the operator-defined template values into
-    /// the attested surface: a host serves the env it can reproduce to this
-    /// hash, never the live config, so granted resource names are sealed.
-    pub env_blake3: String,
     /// RFC 3339 timestamp the seal was authored. Diagnostic only — not
     /// part of the *intent* checked by [`Self::semantically_equal`], so
     /// two hosts signing identical templates seconds apart produce
@@ -169,7 +163,6 @@ impl Seal {
         let mut seal = Seal {
             audience: config.audience.clone(),
             roles,
-            env_blake3: hash_hex(&canonical_env_bytes(&config.env)),
             sealed_at: sealed_at.to_string(),
             kid,
             mac: String::new(),
@@ -202,9 +195,7 @@ impl Seal {
     /// ignored so two hosts signing identical templates produce
     /// reconciliation-equal seals.
     pub fn semantically_equal(&self, other: &Seal) -> bool {
-        self.audience == other.audience
-            && self.roles == other.roles
-            && self.env_blake3 == other.env_blake3
+        self.audience == other.audience && self.roles == other.roles
     }
 
     /// Compute the MAC under `key`. The MAC input is the seal
@@ -215,7 +206,6 @@ impl Seal {
         let canonical = Seal {
             audience: self.audience.clone(),
             roles: self.roles.clone(),
-            env_blake3: self.env_blake3.clone(),
             sealed_at: self.sealed_at.clone(),
             kid: self.kid,
             mac: String::new(),
@@ -238,13 +228,6 @@ impl Seal {
             diffs.push(format!(
                 "audience: sealed as {:?}, local config has {:?}",
                 self.audience, config.audience
-            ));
-        }
-        let local_env_hash = hash_hex(&canonical_env_bytes(&config.env));
-        if self.env_blake3 != local_env_hash {
-            diffs.push(format!(
-                "env: sealed as {}, local [env] hashes to {}",
-                self.env_blake3, local_env_hash
             ));
         }
         // Roles present locally but not in the seal, or where the
@@ -302,13 +285,6 @@ impl Seal {
         }
         diffs
     }
-
-    /// Does `env` reproduce the canonical `[env]` hash this seal pins?
-    /// `mint role inspect` asks this to flag local `[env]` drift without
-    /// recomputing the canonical hash itself.
-    pub fn env_matches(&self, env: &BTreeMap<String, String>) -> bool {
-        self.env_blake3 == hash_hex(&canonical_env_bytes(env))
-    }
 }
 
 /// BLAKE3 of `bytes`, hex-encoded — the encoding used for every
@@ -316,15 +292,6 @@ impl Seal {
 /// to compare cached bytes against the seal.
 pub fn hash_hex(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
-}
-
-/// Canonical serialisation of the `[env]` map — the bytes hashed into
-/// [`Seal::env_blake3`] and written to `sealed/env.json`. Deterministic
-/// (BTreeMap key order, all-string values), so every host materialising
-/// the same `[env]` produces identical bytes and hash.
-pub(crate) fn canonical_env_bytes(env: &BTreeMap<String, String>) -> Vec<u8> {
-    // A String→String map cannot fail to serialise.
-    serde_json::to_vec_pretty(env).expect("serialise env map")
 }
 
 /// `mint serve` startup: resolve the template-seal state
@@ -433,15 +400,10 @@ fn resolve_surface(
     // Serve the cache if it satisfies this seal (its bytes were already
     // re-hashed against their pins by `load`).
     match sealed_cache::load(data_dir).map_err(|e| format!("load sealed cache: {e}"))? {
-        CacheState::Loaded {
-            seal,
-            templates,
-            env,
-        } if seal.semantically_equal(bucket_seal) => {
+        CacheState::Loaded { seal, templates } if seal.semantically_equal(bucket_seal) => {
             return Ok(Some(ServedSurface {
                 seal: bucket_seal.clone(),
                 templates,
-                env,
             }));
         }
         CacheState::Corrupt { reason } => {
@@ -781,7 +743,6 @@ holder = ["bucket"]
         let forged = Seal {
             audience: "mint".into(),
             roles: BTreeMap::new(),
-            env_blake3: "00".repeat(32),
             sealed_at: "t".into(),
             kid: 0,
             mac: "00".repeat(32),

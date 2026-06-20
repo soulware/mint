@@ -39,9 +39,6 @@ roles_dir = {roles:?}
 [store]
 bucket = "demo-bucket"
 
-[env]
-bucket = "demo-bucket"
-
 [[role]]
 name = "volume-ro"
 min_ttl_seconds = 60
@@ -65,8 +62,7 @@ default_ttl_seconds = 86400
 fn stage_cache(cfg_path: &Path) {
     let cfg = Config::load(cfg_path).expect("load config");
     let seal = Seal::build_from_config(&cfg, &Keyring::single([7u8; 32]), "2026-06-05T00:00:00Z");
-    sealed_cache::write(&cfg.data_dir, &seal, &policies_from_config(&cfg), &cfg.env)
-        .expect("write cache");
+    sealed_cache::write(&cfg.data_dir, &seal, &policies_from_config(&cfg)).expect("write cache");
 }
 
 /// Run the compiled binary, returning stdout+stderr combined (the table /

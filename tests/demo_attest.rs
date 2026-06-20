@@ -40,9 +40,6 @@ audience = "mint"
 bucket = "mint-demo"
 [attestation]
 location = "https://attest.elide.internal/v1/discharge"
-[env]
-bucket = "mint-demo"
-prefix = "demo"
 [[role]]
 name = "attested-write"
 min_ttl_seconds = 60
@@ -56,16 +53,16 @@ attested = ["project"]
 intermediate_ttl_seconds = 0
 "#;
 
-/// The shipped demo template: one policy substituting every namespace. The
-/// attestation-sourced `project` resolves through `{{caveat.X}}` like the
-/// issuer-stamped `sub`.
+/// The shipped demo template: a literal bucket/prefix plus the caveat and
+/// mint namespaces. The attestation-sourced `project` resolves through
+/// `{{caveat.X}}` like the issuer-stamped `sub`.
 const POLICY: &str = r#"
 {
   "Version": "2012-10-17",
   "Statement": [{
     "Effect": "Allow",
     "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
-    "Resource": ["arn:aws:s3:::{{env.bucket}}/{{env.prefix}}/{{caveat.sub}}/{{caveat.project}}/*"],
+    "Resource": ["arn:aws:s3:::mint-demo/demo/{{caveat.sub}}/{{caveat.project}}/*"],
     "Condition": {"DateLessThan": {"aws:CurrentTime": "{{mint.expiry}}"}}
   }]
 }
@@ -271,9 +268,9 @@ async fn demo_attest_loop_bakes_then_renders() {
     let (status, body) = body_string(router(state).oneshot(req).await.unwrap()).await;
     assert_eq!(status, StatusCode::OK, "assume-role: {body}");
 
-    // One rendered policy, every namespace in its slot: env.bucket /
-    // env.prefix (sealed config), caveat.sub (issuer-stamped), caveat
-    // .project (attestation-baked), mint.expiry (computed).
+    // One rendered policy, every value in its slot: a literal bucket/prefix,
+    // caveat.sub (issuer-stamped), caveat.project (attestation-baked), and
+    // mint.expiry (computed).
     let calls = minter.calls();
     assert_eq!(calls.len(), 1);
     let policy = &calls[0].policy_json;

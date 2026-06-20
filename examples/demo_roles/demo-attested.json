@@ -5,8 +5,7 @@
     "Effect": "Allow",
     "Action": ["s3:GetObject"],
     "Resource": [
-      "arn:aws:s3:::{{env.bucket}}/{{caveat.sub}}/*",
-      "arn:aws:s3:::{{env.bucket}}/{{caveat.path}}/*"
+      "arn:aws:s3:::{{caveat.bucket}}/{{caveat.sub}}/{{caveat.project}}/*"
     ],
     "Condition": {
       "DateLessThan": {"aws:CurrentTime": "{{mint.expiry}}"}

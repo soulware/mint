@@ -52,8 +52,6 @@ bucket = "demo-bucket"
 location = "https://auth.example/v1/discharge"
 [attestation]
 location = "https://coord-b.example/v1/discharge"
-[env]
-bucket = "demo-bucket"
 [[role]]
 name = "volume-ro"
 min_ttl_seconds = 60
@@ -113,7 +111,7 @@ const POLICY: &str = r#"
   "Statement": [{
     "Effect": "Allow",
     "Action": ["s3:GetObject"],
-    "Resource": ["arn:aws:s3:::{{env.bucket}}/by_id/{{caveat.volume}}/*"],
+    "Resource": ["arn:aws:s3:::demo-bucket/by_id/{{caveat.volume}}/*"],
     "Condition": {"DateLessThan": {"aws:CurrentTime": "{{mint.expiry}}"}}
   }]
 }

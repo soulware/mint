@@ -769,15 +769,12 @@ fn role_list(config: &Path) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("warning: sealed cache is corrupt and will not be served: {reason}");
     }
     let served = match &cache {
-        CacheState::Loaded {
-            seal, templates, ..
-        } => Some((seal, templates)),
+        CacheState::Loaded { seal, templates } => Some((seal, templates)),
         _ => None,
     };
-    // env/audience drift is deployment-wide: it marks every served role
-    // drifted, since it changes the resources each grant renders to.
-    let global_drift =
-        served.is_some_and(|(s, _)| !s.env_matches(&config.env) || s.audience != config.audience);
+    // Audience drift is deployment-wide: it marks every served role
+    // drifted, since it changes the audience each grant is stamped with.
+    let global_drift = served.is_some_and(|(s, _)| s.audience != config.audience);
 
     println!(
         "{:<24} {:>7} {:>7} {:>7}  STATE",
@@ -865,12 +862,6 @@ fn role_inspect(config: &Path, name: &str) -> Result<(), Box<dyn std::error::Err
                         seal.audience, config.audience
                     );
                 }
-                // env is deployment-wide; drift changes the resources every
-                // {{env.X}} in this template renders to.
-                if !seal.env_matches(&config.env) {
-                    eprintln!("  \u{26a0} local [env] has drifted from the seal");
-                }
-
                 // Surface + template come from the sealed bytes.
                 print_policy_surface(sealed_policy);
                 // The request contract (`[role.template]`) is sealed too;
@@ -925,7 +916,6 @@ fn print_policy_surface(template: &str) {
     let surface = mint::template::template_surface(template);
     eprintln!("  policy references:");
     for (label, vals) in [
-        ("env (config)", &surface.env),
         ("mint (mint-computed)", &surface.mint),
         ("caveat (MAC-verified)", &surface.caveat),
     ] {

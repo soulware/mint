@@ -638,13 +638,7 @@ async fn assume_role(State(state): State<AppState>, headers: HeaderMap, body: By
         .with_nanosecond(0)
         .expect("0 is a valid nanosecond");
     let expiry_iso = expiry.to_rfc3339();
-    let policy = match render_policy(
-        policy_template,
-        surface.env(),
-        &caveats,
-        &expiry_iso,
-        &granted.role_name,
-    ) {
+    let policy = match render_policy(policy_template, &caveats, &expiry_iso, &granted.role_name) {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, role = %req.role, "policy render failed");
