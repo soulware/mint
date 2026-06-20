@@ -47,8 +47,7 @@ location = "https://auth.elide.internal/v1/discharge"
 # Colocate the auth role on a UDS instead of a separate auth-service.
 # Demo / single-host only; omit for production.
 [auth.demo]
-enabled = true
-# Defaults to <data_dir>/auth.sock; ignored when enabled = false.
+# Defaults to <data_dir>/auth.sock when omitted.
 socket = "mint_data/auth.sock"
 
 [attestation]
@@ -58,8 +57,7 @@ location = "https://attest.elide.internal/v1/discharge"
 # Colocate the attestation authority on a UDS. Demo / single-host only;
 # requires [auth.demo]. Omit for production.
 [attestation.demo]
-enabled = true
-# Defaults to <data_dir>/attest.sock; ignored when enabled = false.
+# Defaults to <data_dir>/attest.sock when omitted.
 socket = "mint_data/attest.sock"
 
 # Where mint keeps its own enrollment state (`_mint/*`). Operational

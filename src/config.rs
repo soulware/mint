@@ -58,7 +58,7 @@ pub enum ConfigError {
         source: std::net::AddrParseError,
     },
     #[error(
-        "[attestation.demo] enabled = true requires [auth.demo] enabled = true \
+        "[attestation.demo] requires [auth.demo] \
          (the issuer is gated on the demo login session)"
     )]
     DemoAttestationWithoutDemoAuth,
@@ -164,7 +164,7 @@ pub struct RawConfig {
 /// stamped into the enroll-gate (invite), exchange-gate (ticket), and
 /// admin-gate (admin-service) third-party caveats — where a
 /// client/operator fetches the discharge. A mint without it (and without
-/// `[auth.demo].enabled`) cannot stamp those caveats, so it has no
+/// `[auth.demo]`) cannot stamp those caveats, so it has no
 /// enrollment plane — `/v1/enroll` fails closed. The path is the
 /// discharge route; the transport it is dialed over is resolved
 /// separately (`[auth.demo]` socket in the colocated demo, the remembered
@@ -196,42 +196,34 @@ pub struct RawAttestation {
     pub demo: Option<RawDemoAttestation>,
 }
 
-/// `[auth.demo]` block: whether mint colocates the auth-service role and
-/// the UDS it binds. Demo / single-host only; production runs a separate
-/// auth-service binary.
+/// `[auth.demo]` block: colocate the auth-service role and bind its UDS.
+/// Demo / single-host only; production runs a separate auth-service binary.
+/// The table's presence is the switch — omit it to run without a colocated
+/// auth role.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RawDemoAuth {
-    /// When `true`, mint colocates the auth-service role and binds its
-    /// own UDS for `/v1/login` + `/v1/discharge`. Generates `K_M-A` and
-    /// `K_session` on first start. Mint refuses to start with
-    /// `enabled = true` unless mint itself is bound to loopback or UDS —
-    /// see `docs/design-auth-service.md` § *Mint as auth (demo only)*.
-    #[serde(default)]
-    pub enabled: bool,
-    /// UDS path the colocated auth role binds, and the transport the
-    /// operator/client dial to reach it. Path-only (UDS-only). Defaults
-    /// to `<data_dir>/auth.sock` when omitted; ignored when
-    /// `enabled = false`.
+    /// UDS path the colocated auth role binds for `/v1/login` +
+    /// `/v1/discharge`, and the transport the operator/client dial to reach
+    /// it. Path-only (UDS-only). Defaults to `<data_dir>/auth.sock` when
+    /// omitted. (`K_M-A` and `K_session` are generated on first start; mint
+    /// must itself be bound to loopback or UDS — see
+    /// `docs/design-auth-service.md` § *Mint as auth (demo only)*.)
     #[serde(default)]
     pub socket: Option<String>,
 }
 
-/// `[attestation.demo]` block: whether mint colocates the attestation
-/// authority and the UDS it binds. Demo / single-host only; production
-/// runs a real attestation authority (for Elide, the attestation
-/// coordinator) that shares `K_M-B` with mint.
+/// `[attestation.demo]` block: colocate the attestation authority and bind
+/// its UDS. Demo / single-host only; production runs a real attestation
+/// authority (for Elide, the attestation coordinator) that shares `K_M-B`
+/// with mint. The table's presence is the switch — omit it for production.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RawDemoAttestation {
-    /// When `true`, mint colocates the attestation authority and binds
-    /// its own UDS for `/v1/discharge`. Generates `K_M-B` on first
-    /// start. Requires `[auth.demo].enabled = true`: the issuer is gated
-    /// on the same login session the demo auth role mints.
-    #[serde(default)]
-    pub enabled: bool,
-    /// UDS path the colocated attestation authority binds, and the
-    /// transport the client dials to reach it. Path-only (UDS-only).
-    /// Defaults to `<data_dir>/attest.sock` when omitted; ignored when
-    /// `enabled = false`.
+    /// UDS path the colocated attestation authority binds for
+    /// `/v1/discharge`, and the transport the client dials to reach it.
+    /// Path-only (UDS-only). Defaults to `<data_dir>/attest.sock` when
+    /// omitted. (`K_M-B` is generated on first start. Requires `[auth.demo]`:
+    /// the issuer is gated on the same login session the demo auth role
+    /// mints.)
     #[serde(default)]
     pub socket: Option<String>,
 }
@@ -383,26 +375,24 @@ pub fn default_mint_socket() -> PathBuf {
     PathBuf::from(DEFAULT_DATA_DIR).join(DEFAULT_SOCKET_NAME)
 }
 
-/// Colocated demo auth role, post-validation.
+/// Colocated demo auth role, post-validation. Present iff `[auth.demo]` was
+/// configured.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DemoAuth {
-    pub enabled: bool,
-    /// UDS the demo auth role binds, and the transport the
-    /// operator/client dial to reach it. Resolved from
-    /// `[auth.demo].socket` (explicit) or `<data_dir>/auth.sock`
-    /// (default). `None` when `enabled = false`.
-    pub socket: Option<PathBuf>,
+    /// UDS the demo auth role binds, and the transport the operator/client
+    /// dial to reach it. Resolved from `[auth.demo].socket` (explicit) or
+    /// `<data_dir>/auth.sock` (default).
+    pub socket: PathBuf,
 }
 
-/// Colocated demo attestation authority, post-validation.
+/// Colocated demo attestation authority, post-validation. Present iff
+/// `[attestation.demo]` was configured.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DemoAttestation {
-    pub enabled: bool,
     /// UDS the demo attestation authority binds, and the transport the
-    /// client dials to reach it. Resolved from
-    /// `[attestation.demo].socket` (explicit) or `<data_dir>/attest.sock`
-    /// (default). `None` when `enabled = false`.
-    pub socket: Option<PathBuf>,
+    /// client dials to reach it. Resolved from `[attestation.demo].socket`
+    /// (explicit) or `<data_dir>/attest.sock` (default).
+    pub socket: PathBuf,
 }
 
 /// Validated configuration, ready to serve.
@@ -579,34 +569,25 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR));
         let listener = resolve_listener(raw.bind.as_deref(), raw.socket.as_deref(), &data_dir)?;
-        let demo_auth = demo_auth_raw.map(|d| {
-            let socket = d.enabled.then(|| {
-                d.socket
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| data_dir.join("auth.sock"))
-            });
-            DemoAuth {
-                enabled: d.enabled,
-                socket,
-            }
+        // Presence of the `[*.demo]` table is the switch; the socket always
+        // resolves (an explicit path, else the per-role default under
+        // `data_dir`).
+        let demo_auth = demo_auth_raw.map(|d| DemoAuth {
+            socket: d
+                .socket
+                .map(PathBuf::from)
+                .unwrap_or_else(|| data_dir.join("auth.sock")),
         });
-        let demo_attestation = demo_attestation_raw.map(|d| {
-            let socket = d.enabled.then(|| {
-                d.socket
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| data_dir.join("attest.sock"))
-            });
-            DemoAttestation {
-                enabled: d.enabled,
-                socket,
-            }
+        let demo_attestation = demo_attestation_raw.map(|d| DemoAttestation {
+            socket: d
+                .socket
+                .map(PathBuf::from)
+                .unwrap_or_else(|| data_dir.join("attest.sock")),
         });
         // The demo attestation authority gates issuance on the login
         // session the demo auth role mints (verified under K_session),
         // so it cannot exist without the colocated auth role.
-        if demo_attestation.as_ref().is_some_and(|d| d.enabled)
-            && !demo_auth.as_ref().is_some_and(|d| d.enabled)
-        {
+        if demo_attestation.is_some() && demo_auth.is_none() {
             return Err(ConfigError::DemoAttestationWithoutDemoAuth);
         }
         Ok(Config {
@@ -1095,12 +1076,14 @@ policy_file = "r.json"
         // `[auth.demo]` colocation subtable, injected before `[[role]]`.
         let toml = with_block(
             SAMPLE,
-            "[auth]\nlocation = \"https://auth.example/v1/discharge\"\n\n[auth.demo]\nenabled = true",
+            "[auth]\nlocation = \"https://auth.example/v1/discharge\"\n\n[auth.demo]",
         );
         let c = parse_for_test(&toml, &[("volume-ro.json", "{}")]).expect("parse");
         let demo = c.demo_auth.expect("demo_auth present");
-        assert!(demo.enabled);
-        assert!(demo.socket.is_some(), "socket resolves when enabled");
+        assert!(
+            demo.socket.ends_with("auth.sock"),
+            "socket resolves to the default"
+        );
         assert_eq!(
             c.auth_location.expect("auth_location present"),
             "https://auth.example/v1/discharge"
@@ -1108,14 +1091,17 @@ policy_file = "r.json"
     }
 
     #[test]
-    fn demo_auth_enabled_defaults_to_false() {
-        // `[auth.demo]` alone implicitly creates the `[auth]` table with
-        // no location — demo colocation present, enabled defaulting false.
+    fn demo_auth_table_presence_is_the_switch() {
+        // `[auth.demo]` alone (implicitly creating `[auth]` with no
+        // location) colocates the role; an explicit socket is honoured.
         let toml = with_block(SAMPLE, "[auth.demo]\nsocket = \"x.sock\"");
         let c = parse_for_test(&toml, &[("volume-ro.json", "{}")]).expect("parse");
         let demo = c.demo_auth.expect("demo_auth present");
-        assert!(!demo.enabled);
-        assert!(demo.socket.is_none(), "socket ignored when disabled");
+        assert!(demo.socket.ends_with("x.sock"), "explicit socket honoured");
+
+        // Omitting the table leaves no colocated auth role.
+        let c = parse_for_test(SAMPLE, &[("volume-ro.json", "{}")]).expect("parse");
+        assert!(c.demo_auth.is_none(), "no [auth.demo] table → no demo auth");
     }
 
     #[test]

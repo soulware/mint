@@ -140,24 +140,19 @@ pub async fn run(
     // operator surface, not an auth-role concern).
     let mint_app = crate::admin::mount(router(state.clone()), state.clone());
 
-    // The auth role lives on its own UDS when `[auth.demo].enabled =
-    // true`. mint-as-auth is structurally not mint: separate listener,
-    // separate router, no shared HTTP path. Production deploys run a
-    // standalone auth-service binary instead — mint never opens this
-    // socket without `[auth.demo]`. (`socket` is `Some` only when
-    // `enabled`, resolved in `Config::from_raw`.)
-    let auth_socket = state
-        .config
-        .demo_auth
-        .as_ref()
-        .and_then(|d| d.socket.clone());
+    // The auth role lives on its own UDS when `[auth.demo]` is present.
+    // mint-as-auth is structurally not mint: separate listener, separate
+    // router, no shared HTTP path. Production deploys run a standalone
+    // auth-service binary instead — mint never opens this socket without
+    // `[auth.demo]`.
+    let auth_socket = state.config.demo_auth.as_ref().map(|d| d.socket.clone());
     // Same shape for the demo attestation authority: its own UDS, its
-    // own router, only under `[attestation.demo].enabled = true`.
+    // own router, only when `[attestation.demo]` is present.
     let attest_socket = state
         .config
         .demo_attestation
         .as_ref()
-        .and_then(|d| d.socket.clone());
+        .map(|d| d.socket.clone());
 
     let mint_listener: Pin<Box<dyn Future<Output = io::Result<()>> + Send>> = match transport {
         Listener::Tcp(addr) => {

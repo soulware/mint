@@ -188,7 +188,7 @@ the value from `(sub, role)` (the attested caveat's CID seals the role name for 
   the operator's authority is the **admin-service** machine token (written by `serve` at first
   start) + a fresh discharge + per-call PoP. Production runs a standalone auth-service binary
   sharing `K_M-A` with mint; `auth.rs` is its in-tree demo stand-in, mounted on its own UDS only
-  when `[auth.demo].enabled`.
+  when `[auth.demo]` is configured.
 - `attest` / `tpc` — third-party-caveat (TPC) primitives and the **demo-only** attestation-discharge
   issuer (mounted only under `[attestation.demo]`). `tpc` builds the AEAD-encrypted `(VID, CID)`
   payload: a fresh ephemeral root `r` is sealed in VID under the chain tag `T_{n-1}` (so the verifier

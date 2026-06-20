@@ -1,7 +1,7 @@
 //! mint-as-auth role — demo-only discharge issuer.
 //!
 //! Structurally separate from the mint role. The discharge route
-//! mounts only when `[auth].demo_enabled = true`; production deploys
+//! mounts only when `[auth.demo]` is configured; production deploys
 //! run a standalone auth-service binary that issues discharges over
 //! its own wire and shares `K_M-A` with mint. Mint's
 //! [`verify_and_clear`](crate::http::verify_and_clear) verifies any
@@ -51,7 +51,7 @@
 //! ([`tpc::decrypt_vid`]) — the two recover identical keys by
 //! construction.
 //!
-//! Demo gate: `[auth].demo_enabled` must be true *and* the request must
+//! Demo gate: `[auth.demo]` must be configured *and* the request must
 //! have arrived over the UDS listener (we never expose discharge
 //! issuance on TCP). The router-mount in `main.rs` enforces the first
 //! gate; defence-in-depth for the second.

@@ -33,8 +33,10 @@ fn mint_demo_config_loads() {
     // The demo colocates the auth role so the operator admin plane
     // (login / invite / enroll) has a discharge issuer and a admin-service.
     let demo = cfg.demo_auth.expect("[auth.demo] present");
-    assert!(demo.enabled, "demo colocates the auth role");
-    assert!(demo.socket.is_some(), "demo auth role binds a UDS");
+    assert!(
+        demo.socket.ends_with("auth.sock"),
+        "demo auth role binds a UDS"
+    );
     assert!(
         cfg.auth_location.is_some(),
         "demo configures the admin-service location"
@@ -42,8 +44,10 @@ fn mint_demo_config_loads() {
     // …and the attestation authority, so `demo-attested` has a
     // discharge issuer for its attested TPC.
     let attest = cfg.demo_attestation.expect("[attestation.demo] present");
-    assert!(attest.enabled, "demo colocates the attestation authority");
-    assert!(attest.socket.is_some(), "demo attestation binds a UDS");
+    assert!(
+        attest.socket.ends_with("attest.sock"),
+        "demo attestation binds a UDS"
+    );
     assert!(
         cfg.attestation_location.is_some(),
         "the attested role requires attestation_location"

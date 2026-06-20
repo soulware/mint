@@ -558,7 +558,7 @@ impl Store {
                 if !demo_enabled {
                     return Err(io::Error::other(format!(
                         "K_M-A absent at {path:?}; mint requires auth-service \
-                         enrollment or [auth.demo] enabled = true"
+                         enrollment or [auth.demo]"
                     )));
                 }
                 let mut fresh = [0u8; 32];
@@ -602,7 +602,7 @@ impl Store {
                 if !demo_enabled {
                     return Err(io::Error::other(format!(
                         "K_M-B absent at {path:?}; mint requires attestation-authority \
-                         enrollment or demo mode ([auth.demo] enabled = true)"
+                         enrollment or demo mode ([auth.demo])"
                     )));
                 }
                 let mut fresh = [0u8; 32];
