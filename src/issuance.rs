@@ -53,6 +53,30 @@ pub enum EnrollError {
     Unsatisfiable,
 }
 
+/// A source-stamped caveat baked into a credential at exchange — a
+/// holder-supplied value (fixed at `enroll-exchange`) or a discharged
+/// attested value (resolved at `exchange-finalize`). Named rather than a
+/// bare `(String, String)` so name and value cannot be transposed at a call
+/// site and a signature carrying it reads as "the values to bake," not an
+/// anonymous pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BakedCaveat {
+    pub name: String,
+    pub value: String,
+}
+
+impl BakedCaveat {
+    /// Construct from any string-like name/value — the two arguments are
+    /// distinct fields, so a transposed call is a type-checked mistake at
+    /// the few sites that build these, not a silent wrong-order bug.
+    pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            value: value.into(),
+        }
+    }
+}
+
 /// Fixed `client_id` bound into the **invite's** third-party caveat (the
 /// enroll gate). The invite is one shared macaroon org-wide — one org,
 /// one enroll gate — so its single `CID` means one enroll-gate discharge
@@ -167,7 +191,7 @@ pub fn mint_credential(
     cnf: &str,
     role: &str,
     rev_epoch: u64,
-    baked: &[(String, String)],
+    baked: &[BakedCaveat],
 ) -> Macaroon {
     let mut caveats = vec![
         Caveat::scalar(name::OP, op::ASSUME_ROLE),
@@ -177,8 +201,8 @@ pub fn mint_credential(
         Caveat::scalar(name::ROLE, role),
         Caveat::scalar(name::EPOCH, rev_epoch.to_string()),
     ];
-    for (n, v) in baked {
-        caveats.push(Caveat::scalar(n, v));
+    for b in baked {
+        caveats.push(Caveat::scalar(&b.name, &b.value));
     }
     macaroon::mint(keyring, caveats)
 }
@@ -213,7 +237,7 @@ pub fn mint_intermediate(
     role: &str,
     rev_epoch: u64,
     exp: Option<u64>,
-    baked: &[(String, String)],
+    baked: &[BakedCaveat],
     attested: AttestedTpc<'_>,
 ) -> Macaroon {
     let mut caveats = vec![
@@ -227,8 +251,8 @@ pub fn mint_intermediate(
     if let Some(exp_unix) = exp {
         caveats.push(Caveat::scalar(name::EXP, exp_unix.to_string()));
     }
-    for (n, v) in baked {
-        caveats.push(Caveat::scalar(n, v));
+    for b in baked {
+        caveats.push(Caveat::scalar(&b.name, &b.value));
     }
     let base = macaroon::mint(keyring, caveats);
     // `r` is fresh per caveat, so the discharge binds to this intermediate
@@ -405,7 +429,7 @@ mod tests {
         // ordinary MAC'd caveats and **no** third-party caveat — render
         // resolves them through `{{caveat.X}}`.
         let kr = ring();
-        let baked = [("project".to_string(), "images".to_string())];
+        let baked = [BakedCaveat::new("project", "images")];
         let cred = mint_credential(&kr, "mint", SUB, &cnf(), "demo-attested", 7, &baked);
         assert!(cred.verify(&kr));
         let pe = EffectiveCaveats::new(cred.caveats());
@@ -430,7 +454,7 @@ mod tests {
             "volume-ro",
             7,
             Some(1_700_000_000),
-            &[("bucket".to_string(), "images".to_string())],
+            &[BakedCaveat::new("bucket", "images")],
             AttestedTpc {
                 k_m_b: &K_M_B,
                 org_id: "org_demo",

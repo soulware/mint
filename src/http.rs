@@ -1131,10 +1131,10 @@ async fn enroll_exchange(
     // deployment's IAM account boundary contains their scope. Fail closed
     // on either divergence with a clean 400 (the role is known; the request
     // is malformed).
-    let mut baked: Vec<(String, String)> = Vec::with_capacity(sealed_role.holder.len());
+    let mut baked: Vec<issuance::BakedCaveat> = Vec::with_capacity(sealed_role.holder.len());
     for n in &sealed_role.holder {
         match exch.caveats.get(n) {
-            Some(v) => baked.push((n.clone(), v.clone())),
+            Some(v) => baked.push(issuance::BakedCaveat::new(n.clone(), v.clone())),
             None => {
                 audit("denied:missing_holder", &caveats, &role);
                 return respond(
@@ -1388,10 +1388,10 @@ async fn exchange_finalize(
     // identically to a non-attested role's. The names come from the same
     // sealed contract, so a drift between step 1 and step 2 fails closed.
     let interm = EffectiveCaveats::new(cleared.primary.caveats());
-    let mut baked: Vec<(String, String)> = Vec::new();
+    let mut baked: Vec<issuance::BakedCaveat> = Vec::new();
     for n in &sealed_role.holder {
         match interm.resolve(n) {
-            Resolved::Value(v) => baked.push((n.clone(), v)),
+            Resolved::Value(v) => baked.push(issuance::BakedCaveat::new(n.clone(), v)),
             _ => {
                 audit("denied:missing_holder", &caveats, &role);
                 return respond(
@@ -1409,7 +1409,7 @@ async fn exchange_finalize(
     let dis = EffectiveCaveats::new(&cleared.discharge_caveats);
     for n in &sealed_role.attested {
         match dis.resolve(n) {
-            Resolved::Value(v) => baked.push((n.clone(), v)),
+            Resolved::Value(v) => baked.push(issuance::BakedCaveat::new(n.clone(), v)),
             _ => {
                 audit("denied:missing_attested", &caveats, &role);
                 return respond(
