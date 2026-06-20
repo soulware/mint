@@ -72,7 +72,8 @@ pub(crate) struct AttestRequest {
     /// bound `(client_id, org_id, mode)`.
     pub(crate) cid: String,
     /// The `(name, value)` pairs the discharge is to attest — the names
-    /// the role's policy template substitutes as `{{attested.X}}`.
+    /// the role bakes at exchange and its policy template substitutes as
+    /// `{{caveat.X}}`.
     pub(crate) attested: BTreeMap<String, String>,
 }
 
