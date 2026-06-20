@@ -34,11 +34,9 @@ bucket = "demo-bucket"
 [auth]
 location = "https://auth.example/v1/discharge"
 [auth.demo]
-enabled = true
 [attestation]
 location = "https://attest.example/v1/discharge"
 [attestation.demo]
-enabled = true
 [[role]]
 name = "writer"
 ttl_seconds = 900

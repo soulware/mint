@@ -37,7 +37,6 @@ bucket = "demo-bucket"
 [auth]
 location = "https://auth.example/"
 [auth.demo]
-enabled = true
 [[role]]
 name = "volume-rw"
 ttl_seconds = 900

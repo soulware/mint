@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Key provisioning mirrors `mint serve`'s `open_store`, over the
     // local backend.
-    let demo_enabled = config.demo_auth.as_ref().is_some_and(|d| d.enabled);
+    let demo_enabled = config.demo_auth.is_some();
     let mut store = Store::open_local(&config.data_dir).await?;
     if demo_enabled || config.auth_location.is_some() {
         store.init_k_m_a(&config.data_dir, demo_enabled)?;
@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             store.init_k_session(&config.data_dir)?;
         }
     }
-    let attest_demo = config.demo_attestation.as_ref().is_some_and(|d| d.enabled);
+    let attest_demo = config.demo_attestation.is_some();
     if config.roles.values().any(|r| r.is_attested()) || attest_demo {
         store.init_k_m_b(&config.data_dir, demo_enabled)?;
     }

@@ -393,7 +393,7 @@ async fn open_store(cfg: &Config) -> Result<(Store, TigrisHandles), Box<dyn std:
     // production instance must have its keyring (and K_M-A) provisioned
     // out-of-band and fails closed if absent; only a demo instance mints
     // a fresh master key.
-    let demo_enabled = cfg.demo_auth.as_ref().is_some_and(|d| d.enabled);
+    let demo_enabled = cfg.demo_auth.is_some();
     let mut store =
         Store::open_remote(s3, &cfg.data_dir.join("root_keys"), None, demo_enabled).await?;
     // K_M-A is needed wherever an auth integration is configured (TPC
@@ -413,7 +413,7 @@ async fn open_store(cfg: &Config) -> Result<(Store, TigrisHandles), Box<dyn std:
     // co-located attestation authority (which reads the same file) or
     // the demo authority alike; a production mint has it provisioned
     // out-of-band by its attestation authority.
-    let attest_demo = cfg.demo_attestation.as_ref().is_some_and(|d| d.enabled);
+    let attest_demo = cfg.demo_attestation.is_some();
     if cfg.roles.values().any(|r| r.is_attested()) || attest_demo {
         store.init_k_m_b(&cfg.data_dir, demo_enabled)?;
     }
@@ -476,19 +476,14 @@ fn admin_target(cfg: &Config) -> mint::admin::AdminTarget<'_> {
 }
 
 /// Derive the auth transport from a mint config's colocated demo auth
-/// role: `unix:<[auth.demo].socket>`. Present only when
-/// `[auth.demo].enabled = true` — the only auth backend that exists
-/// in-tree. Production runs a separate auth-service binary, reached via
-/// `mint login --url`.
+/// role: `unix:<[auth.demo].socket>`. Present only when the `[auth.demo]`
+/// table is — the only auth backend that exists in-tree. Production runs a
+/// separate auth-service binary, reached via `mint login --url`.
 fn config_auth_transport(cfg: &Config) -> Result<String, Box<dyn std::error::Error>> {
-    let socket = cfg
-        .demo_auth
-        .as_ref()
-        .and_then(|d| d.socket.clone())
-        .ok_or(
-            "config has no colocated demo auth role \
-             ([auth.demo].enabled = true); pass --url instead",
-        )?;
+    let socket = cfg.demo_auth.as_ref().map(|d| d.socket.clone()).ok_or(
+        "config has no colocated demo auth role \
+             ([auth.demo]); pass --url instead",
+    )?;
     Ok(format!("unix:{}", socket.display()))
 }
 
@@ -524,7 +519,7 @@ async fn login(
     if let Some(attest_socket) = cfg
         .as_ref()
         .and_then(|c| c.demo_attestation.as_ref())
-        .and_then(|d| d.socket.as_ref())
+        .map(|d| &d.socket)
     {
         let attest_transport = format!("unix:{}", attest_socket.display());
         mint::session::save_attest_transport(&attest_transport)?;
