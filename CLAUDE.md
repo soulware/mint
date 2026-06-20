@@ -152,7 +152,8 @@ validates the value from `(sub, mode)`.
 - `caveat` / `macaroon` — the caveat algebra and wire format (above).
 - `pop` — the holder-of-key gate.
 - `issuance` — `mint_invite` / `mint_credential_ticket` / `mint_intermediate` (attested step 1) /
-  `mint_credential` (the primary; bakes the discharged attested values for attested roles) — each a
+  `mint_credential` (the primary; bakes the credential's source-stamped caveats — holder-supplied
+  values fixed at exchange and, for attested roles, the discharged attested values) — each a
   fresh chain from root — plus `mint_admin_service_token`, `bound_identity`.
 - `keyring` — the **root-key keyring**: ordered `(kid, key)` generations + a `current` pointer.
   Verification accepts any kid still in the ring; minting always uses `current`. Stored as a

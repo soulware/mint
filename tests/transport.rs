@@ -189,6 +189,7 @@ async fn full_flow_over_unix_socket() {
             mint::client::CREDENTIAL_TICKET_FILE,
             role,
             &cred,
+            &[],
             &attest,
         )
         .await
@@ -212,6 +213,7 @@ async fn full_flow_over_unix_socket() {
             mint::client::CREDENTIAL_TICKET_FILE,
             role,
             &cred,
+            &[],
             &attest,
         )
         .await

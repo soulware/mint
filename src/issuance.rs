@@ -151,12 +151,15 @@ pub struct AttestedTpc<'a> {
 /// revoke bumps the enrolled record's epoch, so a credential minted
 /// before it carries a now-stale value and can never clear again.
 ///
-/// `baked_attested` carries the attestation-sourced `(name, value)` pairs
-/// for a role declaring `[role.attestation]`, resolved from the authority's
-/// discharge at `POST /v1/exchange-finalize` and stamped here as ordinary
-/// MAC'd scalar caveats — point-in-time, indistinguishable thereafter from
-/// the issuer-stamped `sub`. The credential carries **no** third-party
-/// caveat: `assume-role` is a pure render. Non-attested roles pass `&[]`.
+/// `baked` carries the credential's source-stamped `(name, value)` pairs —
+/// the holder-supplied caveats fixed at exchange (from the PoP-signed
+/// `enroll-exchange` body) and, for a role declaring `[role.attestation]`,
+/// the attestation-sourced values resolved from the authority's discharge at
+/// `POST /v1/exchange-finalize`. Both are stamped here as ordinary MAC'd
+/// scalar caveats — point-in-time, indistinguishable thereafter from the
+/// issuer-stamped `sub` and rendered through `{{caveat.X}}`. The credential
+/// carries **no** third-party caveat: `assume-role` is a pure render. A role
+/// declaring neither source passes `&[]`.
 pub fn mint_credential(
     keyring: &Keyring,
     audience: &str,
@@ -164,7 +167,7 @@ pub fn mint_credential(
     cnf: &str,
     role: &str,
     rev_epoch: u64,
-    baked_attested: &[(String, String)],
+    baked: &[(String, String)],
 ) -> Macaroon {
     let mut caveats = vec![
         Caveat::scalar(name::OP, op::ASSUME_ROLE),
@@ -174,7 +177,7 @@ pub fn mint_credential(
         Caveat::scalar(name::ROLE, role),
         Caveat::scalar(name::EPOCH, rev_epoch.to_string()),
     ];
-    for (n, v) in baked_attested {
+    for (n, v) in baked {
         caveats.push(Caveat::scalar(n, v));
     }
     macaroon::mint(keyring, caveats)
@@ -195,6 +198,12 @@ pub fn mint_credential(
 /// the holder keeps it and finalizes per-use for its lifetime. A no-`exp`
 /// intermediate verifies and clears cleanly at finalize — `exp` is a bound,
 /// not a required caveat.
+///
+/// `baked` carries the holder-supplied caveats fixed at `enroll-exchange`
+/// (from the PoP-signed body). They are MAC'd into the intermediate here so
+/// the holder cannot tamper with them, and `exchange-finalize` reads them
+/// back off this chain to re-stamp onto the final credential alongside the
+/// attested values. A role declaring no holder source passes `&[]`.
 #[allow(clippy::too_many_arguments)]
 pub fn mint_intermediate(
     keyring: &Keyring,
@@ -204,6 +213,7 @@ pub fn mint_intermediate(
     role: &str,
     rev_epoch: u64,
     exp: Option<u64>,
+    baked: &[(String, String)],
     attested: AttestedTpc<'_>,
 ) -> Macaroon {
     let mut caveats = vec![
@@ -216,6 +226,9 @@ pub fn mint_intermediate(
     ];
     if let Some(exp_unix) = exp {
         caveats.push(Caveat::scalar(name::EXP, exp_unix.to_string()));
+    }
+    for (n, v) in baked {
+        caveats.push(Caveat::scalar(n, v));
     }
     let base = macaroon::mint(keyring, caveats);
     // `r` is fresh per caveat, so the discharge binds to this intermediate
@@ -417,6 +430,7 @@ mod tests {
             "volume-ro",
             7,
             Some(1_700_000_000),
+            &[("bucket".to_string(), "images".to_string())],
             AttestedTpc {
                 k_m_b: &K_M_B,
                 org_id: "org_demo",
@@ -425,6 +439,13 @@ mod tests {
             },
         );
         assert!(interm.verify(&kr));
+        // Holder-supplied caveats baked at enroll-exchange ride the
+        // intermediate as ordinary MAC'd scalars, ready for finalize to
+        // re-stamp onto the credential.
+        assert_eq!(
+            EffectiveCaveats::new(interm.caveats()).resolve("bucket"),
+            Resolved::Value("images".into())
+        );
         // The intermediate's own partition + identity + a short exp.
         let pe = EffectiveCaveats::new(interm.caveats());
         assert_eq!(
@@ -478,6 +499,7 @@ mod tests {
                 "volume-ro",
                 7,
                 Some(1_700_000_000),
+                &[],
                 attested(),
             )
         };
