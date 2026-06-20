@@ -54,7 +54,7 @@ fn mint_demo_config_loads() {
     names.sort_unstable();
     assert_eq!(names, ["demo", "demo-attested"]);
     assert!(
-        cfg.roles["demo-attested"].attestation_mode.is_some(),
+        cfg.roles["demo-attested"].is_attested(),
         "demo-attested carries the attested TPC"
     );
 }

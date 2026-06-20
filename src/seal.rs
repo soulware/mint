@@ -135,11 +135,6 @@ impl Seal {
                 attested,
                 caveat,
                 holder,
-                // Read from live config at exchange (like `auth_location`)
-                // and MAC'd into the credential at mint, so it cannot drift
-                // post-issuance — the opaque TPC `mode`, distinct from the
-                // sealed `attested` contract below (the declared keys).
-                attestation_mode: _,
                 // The intermediate's `exp` lifetime is read from live config
                 // at enroll-exchange and stamped onto the intermediate, not
                 // the assume-role credential the seal pins — outside the

@@ -146,7 +146,7 @@ in `[role.attestation].attested` and must be a **subset of** `[role.template].ca
 list is a gate-only role (a discharge is still required to finalize, but no value is baked). The
 demo attestation authority is **echo-only** — real plumbing (`K_M-B`, an `r`-bound discharge), but
 the verdict is stubbed to "approve whatever value is asked"; a production authority derives or
-validates the value from `(sub, mode)`.
+validates the value from `(sub, role)` (the attested caveat's CID seals the role name for it).
 
 ### Module map
 - `caveat` / `macaroon` — the caveat algebra and wire format (above).

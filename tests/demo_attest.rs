@@ -130,7 +130,7 @@ fn intermediate(k_m_b: &[u8; 32]) -> Macaroon {
         AttestedTpc {
             k_m_b,
             org_id: "demo",
-            mode: "attested-write",
+            role: "attested-write",
             location: ATTEST_LOCATION,
         },
     )

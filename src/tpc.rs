@@ -23,11 +23,10 @@
 //!   the same plaintext.
 //!
 //! - [`encrypt_cid_attested`] — the same layout plus one trailing
-//!   length-prefixed `mode` string, sealed under a second authority key
-//!   (`K_M-B`). `mode` is opaque to mint: it is carried verbatim from a
-//!   role's config to the discharging authority, which alone interprets
-//!   it. mint never inspects it, keeping mint agnostic to the
-//!   authority's vocabulary.
+//!   length-prefixed `role` string, sealed under a second authority key
+//!   (`K_M-B`). `role` is the role name, carried verbatim to the
+//!   discharging authority, which keys its verdict off it. mint never
+//!   dispatches on it, keeping mint agnostic to the authority's policy.
 //!
 //! The seal is ChaCha20-Poly1305 (RFC 8439): each call draws a fresh
 //! random 12-byte nonce and emits `nonce ‖ ciphertext`; decryption
@@ -111,23 +110,21 @@ pub fn build_caveat(
     }
 }
 
-/// Encrypt `r ‖ lp(client_id) ‖ lp(org_id) ‖ lp(mode)` under `K_M-B` to
+/// Encrypt `r ‖ lp(client_id) ‖ lp(org_id) ‖ lp(role)` under `K_M-B` to
 /// produce an **attested** TPC's `CID` — the auth CID layout
-/// ([`encrypt_cid`]) extended with one role-supplied opaque string,
-/// sealed under the key mint shares with the discharging authority
-/// (coord B). `mode` is **opaque to mint**: it is transported verbatim
-/// from the role's config to the authority, which alone assigns it
-/// meaning. mint never inspects or validates it, so mint stays agnostic
-/// to the authority's vocabulary
+/// ([`encrypt_cid`]) extended with the role name, sealed under the key
+/// mint shares with the discharging authority (coord B). The authority
+/// keys its verdict off `role`; mint transports it verbatim and never
+/// dispatches on it, so mint stays agnostic to the authority's policy
 /// (`docs/design-mint.md` § *Attestation contract*).
 pub fn encrypt_cid_attested(
     k_m_b: &[u8; 32],
     r: &[u8; 32],
     client_id: &str,
     org_id: &str,
-    mode: &str,
+    role: &str,
 ) -> Vec<u8> {
-    aead_encrypt(k_m_b, &attested_cid_plaintext(r, client_id, org_id, mode))
+    aead_encrypt(k_m_b, &attested_cid_plaintext(r, client_id, org_id, role))
 }
 
 /// As [`encrypt_cid_attested`] but with a caller-supplied nonce, for
@@ -140,24 +137,24 @@ pub fn encrypt_cid_attested_with_nonce(
     r: &[u8; 32],
     client_id: &str,
     org_id: &str,
-    mode: &str,
+    role: &str,
 ) -> Vec<u8> {
     aead_encrypt_with_nonce(
         k_m_b,
         nonce,
-        &attested_cid_plaintext(r, client_id, org_id, mode),
+        &attested_cid_plaintext(r, client_id, org_id, role),
     )
 }
 
-fn attested_cid_plaintext(r: &[u8; 32], client_id: &str, org_id: &str, mode: &str) -> Vec<u8> {
-    let mut plaintext = Vec::with_capacity(32 + 12 + client_id.len() + org_id.len() + mode.len());
+fn attested_cid_plaintext(r: &[u8; 32], client_id: &str, org_id: &str, role: &str) -> Vec<u8> {
+    let mut plaintext = Vec::with_capacity(32 + 12 + client_id.len() + org_id.len() + role.len());
     plaintext.extend_from_slice(r);
     plaintext.extend_from_slice(&(client_id.len() as u32).to_be_bytes());
     plaintext.extend_from_slice(client_id.as_bytes());
     plaintext.extend_from_slice(&(org_id.len() as u32).to_be_bytes());
     plaintext.extend_from_slice(org_id.as_bytes());
-    plaintext.extend_from_slice(&(mode.len() as u32).to_be_bytes());
-    plaintext.extend_from_slice(mode.as_bytes());
+    plaintext.extend_from_slice(&(role.len() as u32).to_be_bytes());
+    plaintext.extend_from_slice(role.as_bytes());
     plaintext
 }
 
@@ -166,21 +163,21 @@ fn attested_cid_plaintext(r: &[u8; 32], client_id: &str, org_id: &str, mode: &st
 /// fresh `r` for it. `tail` is the chain tag at the appending position;
 /// `r` is recovered by mint via `VID` ([`encrypt_vid`]) and by the
 /// authority via `CID` ([`encrypt_cid_attested`]), but never by the
-/// holder. Mirrors [`build_caveat`] for the auth TPC, plus the opaque
-/// `mode`.
+/// holder. Mirrors [`build_caveat`] for the auth TPC, plus the `role`
+/// name.
 pub fn build_caveat_attested(
     tail: &[u8; 32],
     k_m_b: &[u8; 32],
     client_id: &str,
     org_id: &str,
-    mode: &str,
+    role: &str,
     location: impl Into<String>,
 ) -> Caveat {
     let r = fresh_r();
     Caveat::ThirdParty {
         location: location.into(),
         vid: encrypt_vid(tail, &r),
-        cid: encrypt_cid_attested(k_m_b, &r, client_id, org_id, mode),
+        cid: encrypt_cid_attested(k_m_b, &r, client_id, org_id, role),
     }
 }
 
@@ -294,20 +291,20 @@ pub fn decrypt_cid(k_m_a: &[u8; 32], cid: &[u8]) -> Result<CidPlaintext, TpcErro
 
 /// The plaintext bound into an attested CID by [`encrypt_cid_attested`],
 /// recovered by [`decrypt_cid_attested`]. Extends [`CidPlaintext`] with
-/// the opaque `mode` string mint transported at issuance — meaningful
-/// only to the discharging authority.
+/// the `role` name mint transported at issuance — the authority keys its
+/// verdict off it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttestedCidPlaintext {
     pub r: [u8; 32],
     pub client_id: String,
     pub org_id: String,
-    pub mode: String,
+    pub role: String,
 }
 
 /// Decrypt an **attested** `CID` under `K_M-B` to recover
-/// `(r, client_id, org_id, mode)`. The path the discharging authority
+/// `(r, client_id, org_id, role)`. The path the discharging authority
 /// takes to obtain the discharge-MAC key `r`, the bound identity
-/// strings, and the opaque `mode` it interprets. Mirrors [`decrypt_cid`]
+/// strings, and the `role` it discharges against. Mirrors [`decrypt_cid`]
 /// for the auth TPC.
 pub fn decrypt_cid_attested(
     k_m_b: &[u8; 32],
@@ -325,7 +322,7 @@ fn parse_attested_cid_plaintext(buf: &[u8]) -> Result<AttestedCidPlaintext, TpcE
     let mut pos = 32;
     let client_id = read_length_prefixed_str(buf, &mut pos)?;
     let org_id = read_length_prefixed_str(buf, &mut pos)?;
-    let mode = read_length_prefixed_str(buf, &mut pos)?;
+    let role = read_length_prefixed_str(buf, &mut pos)?;
     if pos != buf.len() {
         return Err(TpcError::Trailing);
     }
@@ -333,7 +330,7 @@ fn parse_attested_cid_plaintext(buf: &[u8]) -> Result<AttestedCidPlaintext, TpcE
         r,
         client_id,
         org_id,
-        mode,
+        role,
     })
 }
 
@@ -545,26 +542,26 @@ mod tests {
     }
 
     #[test]
-    fn attested_cid_round_trips_to_bound_identity_and_mode() {
+    fn attested_cid_round_trips_to_bound_identity_and_role() {
         let k_m_b = [2u8; 32];
         let r = [7u8; 32];
-        // mint treats `mode` as opaque; exercise arbitrary strings.
-        for mode in ["volume-rw", "volume-ro", ""] {
-            let cid = encrypt_cid_attested(&k_m_b, &r, "01ARZ", "org_demo", mode);
+        // mint transports `role` verbatim; exercise arbitrary strings.
+        for role in ["volume-rw", "volume-ro", ""] {
+            let cid = encrypt_cid_attested(&k_m_b, &r, "01ARZ", "org_demo", role);
             let pt = decrypt_cid_attested(&k_m_b, &cid).expect("decrypt");
             assert_eq!(pt.r, r);
             assert_eq!(pt.client_id, "01ARZ");
             assert_eq!(pt.org_id, "org_demo");
-            assert_eq!(pt.mode, mode);
+            assert_eq!(pt.role, role);
         }
     }
 
     #[test]
-    fn attested_cid_plaintext_changes_with_mode() {
+    fn attested_cid_plaintext_changes_with_role() {
         let r = [7u8; 32];
         let rw = attested_cid_plaintext(&r, "01ARZ", "org_demo", "volume-rw");
         let ro = attested_cid_plaintext(&r, "01ARZ", "org_demo", "volume-ro");
-        assert_ne!(rw, ro, "mode must affect the plaintext");
+        assert_ne!(rw, ro, "role must affect the plaintext");
     }
 
     #[test]
@@ -591,13 +588,13 @@ mod tests {
         assert_eq!(&a[..AEAD_NONCE_LEN], &n);
         let pt = decrypt_cid_attested(&k_m_b, &a).expect("decrypt");
         assert_eq!(pt.r, r);
-        assert_eq!(pt.mode, "volume-ro");
+        assert_eq!(pt.role, "volume-ro");
     }
 
     #[test]
-    fn attested_cid_mode_length_prevents_boundary_collision() {
-        // (org="cd", mode="ef") vs (org="cdef", mode="") must not collide —
-        // the mode's length prefix is what separates them.
+    fn attested_cid_role_length_prevents_boundary_collision() {
+        // (org="cd", role="ef") vs (org="cdef", role="") must not collide —
+        // the role's length prefix is what separates them.
         let r = [7u8; 32];
         let a = attested_cid_plaintext(&r, "01ARZ", "cd", "ef");
         let b = attested_cid_plaintext(&r, "01ARZ", "cdef", "");
@@ -626,9 +623,9 @@ mod tests {
 
     #[test]
     fn auth_cid_does_not_parse_as_an_attested_cid() {
-        // Layout separation: an auth CID (no trailing mode field) decrypted
+        // Layout separation: an auth CID (no trailing role field) decrypted
         // with the attested parser under the same key is truncated — there
-        // is no length-prefixed mode to read. The two CID layouts do not
+        // is no length-prefixed role to read. The two CID layouts do not
         // alias.
         let key = [3u8; 32];
         let r = [7u8; 32];
@@ -638,7 +635,7 @@ mod tests {
 
     #[test]
     fn attested_cid_does_not_parse_as_an_auth_cid() {
-        // The reverse: an attested CID carries a trailing mode field the
+        // The reverse: an attested CID carries a trailing role field the
         // auth parser reads as trailing bytes, never silently dropped.
         let key = [3u8; 32];
         let r = [7u8; 32];
@@ -680,7 +677,7 @@ mod tests {
 /// layout-separation invariants over arbitrary keys and arbitrary
 /// (possibly empty, multi-byte, or token-looking) identity strings —
 /// fuzzing the length-prefix parser at every boundary the examples
-/// reach by hand. `client_id`/`org_id`/`mode` are arbitrary `String`s
+/// reach by hand. `client_id`/`org_id`/`role` are arbitrary `String`s
 /// because mint treats them as opaque byte-fields, not validated input.
 #[cfg(test)]
 mod proptests {
@@ -715,16 +712,16 @@ mod proptests {
             );
         }
 
-        /// Attested CID round-trips to its bound identity and opaque mode.
+        /// Attested CID round-trips to its bound identity and role.
         #[test]
         fn attested_cid_round_trips(
             key in key(), r in key(),
-            client in any::<String>(), org in any::<String>(), mode in any::<String>(),
+            client in any::<String>(), org in any::<String>(), role in any::<String>(),
         ) {
-            let cid = encrypt_cid_attested(&key, &r, &client, &org, &mode);
+            let cid = encrypt_cid_attested(&key, &r, &client, &org, &role);
             prop_assert_eq!(
                 decrypt_cid_attested(&key, &cid),
-                Ok(AttestedCidPlaintext { r, client_id: client, org_id: org, mode })
+                Ok(AttestedCidPlaintext { r, client_id: client, org_id: org, role })
             );
         }
 
@@ -745,9 +742,9 @@ mod proptests {
             prop_assert_eq!(a == b, (&c1, &o1) == (&c2, &o2));
         }
 
-        /// Attested CID is injective in `(client, org, mode)` — the mode's
-        /// own length prefix keeps `(org="cd", mode="ef")` distinct from
-        /// `(org="cdef", mode="")` for all strings.
+        /// Attested CID is injective in `(client, org, role)` — the role's
+        /// own length prefix keeps `(org="cd", role="ef")` distinct from
+        /// `(org="cdef", role="")` for all strings.
         #[test]
         fn attested_cid_is_injective_in_its_fields(
             key in key(), n in aead_nonce(), r in key(),
@@ -783,16 +780,16 @@ mod proptests {
         }
 
         /// The auth and attested CID layouts never alias: an auth CID
-        /// (no mode field) read by the attested parser is `Truncated`,
+        /// (no role field) read by the attested parser is `Truncated`,
         /// and an attested CID read by the auth parser has `Trailing`
         /// bytes — for any fields, under the same key.
         #[test]
         fn cid_layouts_do_not_alias(
             key in key(), r in key(),
-            client in any::<String>(), org in any::<String>(), mode in any::<String>(),
+            client in any::<String>(), org in any::<String>(), role in any::<String>(),
         ) {
             let auth = encrypt_cid(&key, &r, &client, &org);
-            let attested = encrypt_cid_attested(&key, &r, &client, &org, &mode);
+            let attested = encrypt_cid_attested(&key, &r, &client, &org, &role);
             prop_assert_eq!(decrypt_cid_attested(&key, &auth), Err(TpcError::Truncated));
             prop_assert_eq!(decrypt_cid(&key, &attested), Err(TpcError::Trailing));
         }

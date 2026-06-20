@@ -57,8 +57,8 @@ fn cid_nonce_ro() -> [u8; tpc::AEAD_NONCE_LEN] {
 }
 const CLIENT_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const ORG_ID: &str = "org_demo";
-const MODE: &str = "volume-rw";
-const MODE_RO: &str = "volume-ro";
+const ROLE: &str = "volume-rw";
+const ROLE_RO: &str = "volume-ro";
 const VOLUME: &str = "01BX5ZZKBKACTAV9WEVGEMMVRZ";
 const EXP: &str = "2099999999";
 
@@ -68,14 +68,14 @@ fn hex(bytes: &[u8]) -> String {
 
 fn vectors_json() -> String {
     let cid =
-        tpc::encrypt_cid_attested_with_nonce(&k_m_b(), &cid_nonce(), &r(), CLIENT_ID, ORG_ID, MODE);
+        tpc::encrypt_cid_attested_with_nonce(&k_m_b(), &cid_nonce(), &r(), CLIENT_ID, ORG_ID, ROLE);
     let cid_volume_ro = tpc::encrypt_cid_attested_with_nonce(
         &k_m_b(),
         &cid_nonce_ro(),
         &r(),
         CLIENT_ID,
         ORG_ID,
-        MODE_RO,
+        ROLE_RO,
     );
     let wire = macaroon::mint_under_key_with_nonce(
         &r(),
@@ -94,7 +94,7 @@ fn vectors_json() -> String {
             "  \"r\": \"{}\",\n",
             "  \"client_id\": \"{}\",\n",
             "  \"org_id\": \"{}\",\n",
-            "  \"mode\": \"{}\",\n",
+            "  \"role\": \"{}\",\n",
             "  \"cid\": \"{}\",\n",
             "  \"cid_volume_ro\": \"{}\",\n",
             "  \"discharge_nonce\": \"{}\",\n",
@@ -107,7 +107,7 @@ fn vectors_json() -> String {
         hex(&r()),
         CLIENT_ID,
         ORG_ID,
-        MODE,
+        ROLE,
         hex(&cid),
         hex(&cid_volume_ro),
         hex(&nonce()),

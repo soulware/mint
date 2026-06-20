@@ -144,14 +144,14 @@ pub fn mint_credential_ticket(
 /// The attested third-party caveat to stamp onto a credential whose role
 /// declares `[role.attestation]` (`docs/design-mint.md` § *Attestation
 /// contract*).
-/// `mode` is opaque to mint, carried verbatim into the CID for the
-/// discharging authority at `location`; the CID is sealed under `K_M-B`
-/// with a fresh per-caveat `r`, so the discharge binds to this
-/// credential alone.
+/// `role` is the role name, carried verbatim into the CID for the
+/// discharging authority at `location` (which keys its verdict off it);
+/// the CID is sealed under `K_M-B` with a fresh per-caveat `r`, so the
+/// discharge binds to this credential alone.
 pub struct AttestedTpc<'a> {
     pub k_m_b: &'a [u8; 32],
     pub org_id: &'a str,
-    pub mode: &'a str,
+    pub role: &'a str,
     pub location: &'a str,
 }
 
@@ -257,7 +257,7 @@ pub fn mint_intermediate(
         attested.k_m_b,
         sub,
         attested.org_id,
-        attested.mode,
+        attested.role,
         attested.location,
     );
     base.attenuate(tpc)
@@ -452,7 +452,7 @@ mod tests {
             AttestedTpc {
                 k_m_b: &K_M_B,
                 org_id: "org_demo",
-                mode: "volume-ro",
+                role: "volume-ro",
                 location: ATT_LOCATION,
             },
         );
@@ -486,12 +486,12 @@ mod tests {
             })
             .expect("a third-party caveat");
         assert_eq!(location, ATT_LOCATION);
-        // The CID seals (sub, org, mode) under K_M-B. `mode` round-trips
+        // The CID seals (sub, org, role) under K_M-B. `role` round-trips
         // verbatim — mint transported it without interpretation.
         let pt = crate::tpc::decrypt_cid_attested(&K_M_B, cid).expect("decrypt cid");
         assert_eq!(pt.client_id, SUB);
         assert_eq!(pt.org_id, "org_demo");
-        assert_eq!(pt.mode, "volume-ro");
+        assert_eq!(pt.role, "volume-ro");
     }
 
     #[test]
@@ -505,7 +505,7 @@ mod tests {
         let attested = || AttestedTpc {
             k_m_b: &K_M_B,
             org_id: "org_demo",
-            mode: "volume-ro",
+            role: "volume-ro",
             location: ATT_LOCATION,
         };
         let mint_one = || {

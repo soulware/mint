@@ -113,12 +113,10 @@ holder = ["bucket"]
 # Marks the role attested: its credential carries an attested third-party
 # caveat the authority discharges at `exchange-finalize`, where the
 # attested values are baked into the credential as ordinary caveats. The
-# opaque `mode` is sealed into the caveat for the authority; it defaults to
-# the role name, set it only to use a distinct name for role vs mode.
-# `attested` lists the names to attest (⊆ `caveat`); empty = a gate-only
+# caveat seals the role name for the authority, which keys its verdict off
+# it. `attested` lists the names to attest (⊆ `caveat`); empty = a gate-only
 # role (a discharge is still required, but no value is baked).
 [role.attestation]
-# mode = "demo-attested"
 attested = ["project"]
 # Lifetime, in seconds, of the `op=exchange-finalize` intermediate handed
 # back at `enroll-exchange` (step 1). Required on every attested role. `0` ⟹
