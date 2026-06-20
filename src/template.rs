@@ -2,16 +2,16 @@
 //!
 //! A role's policy template is **JSON** carrying `{{ ns.key }}` scalar
 //! substitution tokens, each token sitting inside a JSON *string value*.
-//! Three namespaces, each a flat scalar lookup — **every one MAC-verified
-//! or server-side** (`docs/design-mint.md` § *Templating*):
+//! Two namespaces, each a flat scalar lookup — **every one MAC-verified
+//! or mint-computed** (`docs/design-mint.md` § *Templating*):
 //!
-//! - `{{env.X}}`      — sealed server-side config (the `[env]` table).
 //! - `{{mint.X}}`     — mint-computed (`mint.expiry`).
 //! - `{{caveat.X}}`   — MAC-verified caveat values on the primary:
-//!   issuer-stamped (e.g. `caveat.sub`), holder-appended (self-attested
-//!   attenuation), or attestation-baked at exchange — a discharge
-//!   authority vouched the value (restricted to the role's sealed
-//!   `attested` contract) and it was baked as an ordinary MAC'd caveat.
+//!   issuer-stamped (e.g. `caveat.sub`), holder-supplied (fixed at
+//!   exchange), or attestation-baked at exchange — a discharge authority
+//!   vouched the value (restricted to the role's sealed `attested`
+//!   contract) and it was baked as an ordinary MAC'd caveat. A deployment
+//!   constant is written into the template JSON as a literal, not a token.
 //!
 //! Rendering parses the template as JSON, substitutes into the string
 //! leaves, and re-serialises. Two security properties fall out of that
@@ -48,8 +48,8 @@ pub enum TemplateError {
         source: serde_json::Error,
     },
     /// A `{{…}}` token names a field absent from the render data. Strict:
-    /// a missing `env`/`mint`/`attested`/`caveat` value fails the render
-    /// closed, never a silent empty string.
+    /// a missing `mint`/`caveat` value fails the render closed, never a
+    /// silent empty string.
     #[error("policy for role {role:?} references unknown field '{field}'")]
     UnknownField { role: String, field: String },
     /// A `{{…}}` token is not a `namespace.key` scalar path (an unknown
@@ -98,7 +98,7 @@ fn classify_token(inner: &str) -> Option<(&str, &str)> {
     if key.is_empty() {
         return None;
     }
-    matches!(ns, "env" | "mint" | "caveat").then_some((ns, key))
+    matches!(ns, "mint" | "caveat").then_some((ns, key))
 }
 
 /// Render `policy_template` into a concrete IAM policy JSON string.
@@ -116,12 +116,11 @@ fn classify_token(inner: &str) -> Option<(&str, &str)> {
 /// `exchange-finalize` and resolve here like any other `{{caveat.X}}` —
 /// the renderer no longer sees discharges (`assume-role` is a pure render).
 ///
-/// Each class has a distinct, explicit trust provenance: `env.*` config,
-/// `mint.*` mint-computed, `caveat.*` primary-MAC'd (issuer-stamped,
-/// attestation-baked, or holder-appended).
+/// Each class has a distinct, explicit trust provenance: `mint.*`
+/// mint-computed, `caveat.*` primary-MAC'd (issuer-stamped, attestation-
+/// baked, or holder-supplied).
 pub fn render_policy(
     policy_template: &str,
-    env: &BTreeMap<String, String>,
     caveats: &[Caveat],
     expiry: &str,
     role: &str,
@@ -149,7 +148,6 @@ pub fn render_policy(
             return Resolution::Malformed;
         };
         let value = match ns {
-            "env" => env.get(key).cloned(),
             "mint" => (key == "expiry").then(|| expiry.to_string()),
             "caveat" => caveat_map.get(key).cloned(),
             // `classify_token` already rejected unknown namespaces.
@@ -241,12 +239,12 @@ fn substitute_string(
 }
 
 /// The substitution surface a policy template references, grouped by
-/// trust provenance (`docs/design-mint.md` § *Templating*): `env` config,
-/// `mint` mint-computed, `caveat` primary-MAC'd (attestation-baked values
-/// resolve as `caveat` too). Each list is sorted and de-duplicated.
+/// trust provenance (`docs/design-mint.md` § *Templating*): `mint`
+/// mint-computed, `caveat` primary-MAC'd (attestation-baked and
+/// holder-supplied values resolve as `caveat` too). Each list is sorted
+/// and de-duplicated.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct TemplateSurface {
-    pub env: Vec<String>,
     pub mint: Vec<String>,
     pub caveat: Vec<String>,
 }
@@ -269,7 +267,6 @@ pub fn template_surface(template: &str) -> TemplateSurface {
         rest = &after[close + 2..];
         if let Some((ns, _key)) = classify_token(inner) {
             let bucket = match ns {
-                "env" => &mut s.env,
                 "mint" => &mut s.mint,
                 "caveat" => &mut s.caveat,
                 _ => continue,
@@ -277,7 +274,7 @@ pub fn template_surface(template: &str) -> TemplateSurface {
             bucket.push(inner.to_string());
         }
     }
-    for v in [&mut s.env, &mut s.mint, &mut s.caveat] {
+    for v in [&mut s.mint, &mut s.caveat] {
         v.sort();
         v.dedup();
     }
@@ -335,16 +332,12 @@ fn collect_malformed_in_str(s: &str, out: &mut Vec<String>) {
 mod tests {
     use super::*;
 
-    fn env() -> BTreeMap<String, String> {
-        BTreeMap::from([("bucket".to_string(), "demo".to_string())])
-    }
-
     const TPL: &str = r#"{
   "Version": "2012-10-17",
   "Statement": [{
     "Effect": "Allow",
     "Action": ["s3:GetObject"],
-    "Resource": ["arn:aws:s3:::{{env.bucket}}/by_id/{{caveat.volume}}/*"],
+    "Resource": ["arn:aws:s3:::demo-bucket/by_id/{{caveat.volume}}/*"],
     "Condition": {"DateLessThan": {"aws:CurrentTime": "{{mint.expiry}}"}}
   }]
 }"#;
@@ -354,18 +347,18 @@ mod tests {
     }
 
     #[test]
-    fn renders_env_caveat_scalar_and_mint() {
-        // `volume` is an attestation-baked caveat by the time it reaches
-        // the renderer — it resolves through `{{caveat.X}}` like any other.
+    fn renders_caveat_scalar_and_mint() {
+        // The bucket is a deployment constant inlined as a literal; `volume`
+        // is an attestation-baked caveat by the time it reaches the renderer
+        // — it resolves through `{{caveat.X}}` like any other.
         let out = render_policy(
             TPL,
-            &env(),
             &cv(&[("volume", "VOL1")]),
             "2026-05-15T14:30:00Z",
             "volume-ro",
         )
         .unwrap();
-        assert!(out.contains("demo/by_id/VOL1/*"));
+        assert!(out.contains("demo-bucket/by_id/VOL1/*"));
         assert!(out.contains("2026-05-15T14:30:00Z"));
         serde_json::from_str::<Value>(&out).expect("valid json");
     }
@@ -377,7 +370,6 @@ mod tests {
         const TPL_SUB: &str = r#"{"Resource":["arn:aws:s3:::b/clients/{{caveat.sub}}/*"]}"#;
         let out = render_policy(
             TPL_SUB,
-            &env(),
             &cv(&[("sub", "CLIENT1"), ("aud", "mint")]),
             "t",
             "coord-rw",
@@ -396,7 +388,6 @@ mod tests {
             r#"{"Resource":["arn:aws:s3:::b/{{caveat.sub}}/{{caveat.team}}/*"]}"#;
         let out = render_policy(
             TPL_TEAM,
-            &env(),
             &cv(&[("sub", "CLIENT1"), ("team", "blue")]),
             "t",
             "scratch",
@@ -415,7 +406,6 @@ mod tests {
         const TPL_SUB: &str = r#"{"Resource":["{{caveat.sub}}"]}"#;
         let err = render_policy(
             TPL_SUB,
-            &env(),
             &cv(&[("sub", "REAL"), ("sub", "FORGED")]),
             "t",
             "coord-rw",
@@ -430,7 +420,7 @@ mod tests {
     fn missing_caveat_field_fails_closed() {
         // A template referencing caveat.volume with no such caveat present
         // must fail the render, not mint an unscoped credential.
-        let err = render_policy(TPL, &env(), &[], "t", "r");
+        let err = render_policy(TPL, &[], "t", "r");
         assert!(
             matches!(err, Err(TemplateError::UnknownField { .. })),
             "{err:?}"
@@ -443,13 +433,7 @@ mod tests {
         // values live in `{{caveat.X}}`. A leftover `attested.*` token is a
         // malformed (unknown-namespace) token, caught before any render.
         const TPL_R: &str = r#"{"Resource":["{{attested.region}}"]}"#;
-        let err = render_policy(
-            TPL_R,
-            &env(),
-            &cv(&[("region", "eu-west")]),
-            "t",
-            "volume-ro",
-        );
+        let err = render_policy(TPL_R, &cv(&[("region", "eu-west")]), "t", "volume-ro");
         assert!(
             matches!(err, Err(TemplateError::MalformedToken { .. })),
             "{err:?}"
@@ -462,7 +446,7 @@ mod tests {
         // not valid JSON, so the template is rejected — there is no
         // unsafe non-string substitution position to reach.
         const TPL_BAD: &str = r#"{"Resource":[{{caveat.volume}}]}"#;
-        let err = render_policy(TPL_BAD, &env(), &cv(&[("volume", "V")]), "t", "volume-ro");
+        let err = render_policy(TPL_BAD, &cv(&[("volume", "V")]), "t", "volume-ro");
         assert!(matches!(err, Err(TemplateError::NotJson { .. })), "{err:?}");
     }
 
@@ -473,7 +457,7 @@ mod tests {
         const TPL_R: &str =
             r#"{"Statement":[{"Effect":"Allow","Resource":["arn:{{caveat.volume}}"]}]}"#;
         let evil = r#"x","Effect":"Deny"},{"Resource":"*"#;
-        let out = render_policy(TPL_R, &env(), &cv(&[("volume", evil)]), "t", "volume-ro").unwrap();
+        let out = render_policy(TPL_R, &cv(&[("volume", evil)]), "t", "volume-ro").unwrap();
         let v: Value = serde_json::from_str(&out).expect("output is valid json");
         let stmts = v["Statement"].as_array().expect("statement array");
         assert_eq!(stmts.len(), 1, "value injected a statement: {out}");
@@ -490,7 +474,7 @@ mod tests {
         // A leftover handlebars-ism and a namespace-less token are both
         // rejected, not rendered as empty.
         for bad in [r#"{"x":"{{#each items}}"}"#, r#"{"x":"{{volume}}"}"#] {
-            let err = render_policy(bad, &env(), &cv(&[("volume", "V")]), "t", "r");
+            let err = render_policy(bad, &cv(&[("volume", "V")]), "t", "r");
             assert!(
                 matches!(err, Err(TemplateError::MalformedToken { .. })),
                 "{bad}: {err:?}"
@@ -501,7 +485,7 @@ mod tests {
     #[test]
     fn render_error_names_the_role() {
         // Operator-facing: the error must point at the role.
-        let err = render_policy(r#"{"x":"{{caveat.volume}}"}"#, &env(), &[], "t", "read")
+        let err = render_policy(r#"{"x":"{{caveat.volume}}"}"#, &[], "t", "read")
             .expect_err("missing caveat.volume must fail closed");
         assert!(
             err.to_string().contains("\"read\""),
@@ -514,13 +498,14 @@ mod tests {
         // Shape errors are reported (the seal-time lint); well-formed
         // tokens — even ones whose value is absent until a request — are
         // not, because absence is a render-time data concern, not a
-        // template defect. A stale `attested.*` token is now a shape error
-        // (unknown namespace) and *is* reported.
+        // template defect. A stale `attested.*`/`env.*` token is now a shape
+        // error (unknown namespace) and *is* reported.
         let doc = serde_json::json!({
-            "ok": "arn:{{env.bucket}}/{{caveat.volume}}",
+            "ok": "arn:literal-bucket/{{caveat.volume}}/{{mint.expiry}}",
             "engineism": "{{#each items}}",
             "no_namespace": "{{volume}}",
             "stale_attested": "{{attested.nonesuch}}",
+            "stale_env": "{{env.bucket}}",
             "nested": ["{{caveat.sub}}", "{{ bad token }}"],
         });
         let bad = malformed_tokens(&doc);
@@ -531,9 +516,10 @@ mod tests {
             bad.contains(&"{{attested.nonesuch}}".to_string()),
             "{bad:?}"
         );
+        assert!(bad.contains(&"{{env.bucket}}".to_string()), "{bad:?}");
         assert!(
-            !bad.iter().any(|t| t.contains("env.bucket")
-                || t.contains("caveat.volume")
+            !bad.iter().any(|t| t.contains("caveat.volume")
+                || t.contains("mint.expiry")
                 || t.contains("caveat.sub")),
             "well-formed token reported as malformed: {bad:?}"
         );
@@ -547,9 +533,9 @@ mod tests {
 
     #[test]
     fn surface_groups_refs_by_provenance() {
-        // TPL references env, mint, and a caveat (the baked `volume`).
+        // TPL references mint and a caveat (the baked `volume`); the bucket
+        // is an inlined literal, not a token.
         let s = template_surface(TPL);
-        assert_eq!(s.env, vec!["env.bucket"]);
         assert_eq!(s.mint, vec!["mint.expiry"]);
         assert_eq!(s.caveat, vec!["caveat.volume"]);
 
@@ -557,10 +543,10 @@ mod tests {
         assert_eq!(cav.caveat, vec!["caveat.sub"]);
 
         // Tokens that aren't `namespace.key` scalar paths contribute
-        // nothing — an unknown namespace (incl. the retired `attested`),
+        // nothing — an unknown namespace (incl. the retired `attested`/`env`),
         // whitespace, a bare name.
-        let noise = template_surface("{{attested.x}} {{../env.region}} {{ a b }}{{volume}}");
-        assert!(noise.env.is_empty() && noise.mint.is_empty() && noise.caveat.is_empty());
+        let noise = template_surface("{{attested.x}} {{env.region}} {{ a b }}{{volume}}");
+        assert!(noise.mint.is_empty() && noise.caveat.is_empty());
     }
 }
 
@@ -573,10 +559,6 @@ mod tests {
 mod proptests {
     use super::*;
     use proptest::prelude::*;
-
-    fn env_one(key: &str, val: &str) -> BTreeMap<String, String> {
-        BTreeMap::from([(key.to_string(), val.to_string())])
-    }
 
     fn cav(volume: &str) -> Vec<Caveat> {
         vec![Caveat::scalar("volume", volume)]
@@ -598,7 +580,7 @@ mod proptests {
             Just(":".to_string()),
             Just("\n".to_string()),
             Just("\u{0}".to_string()),
-            Just("{{env.bucket}}".to_string()),
+            Just("{{caveat.volume}}".to_string()),
             Just("{{attested.volume}}".to_string()),
             "[a-z0-9/_-]{0,5}".prop_map(String::from),
             any::<char>().prop_map(|c| c.to_string()),
@@ -613,7 +595,7 @@ mod proptests {
         #[test]
         fn value_lands_intact_and_output_is_valid_json(value in evil_value()) {
             const TPL: &str = r#"{"Resource":["arn:aws:s3:::{{caveat.volume}}/*"]}"#;
-            let out = render_policy(TPL, &env_one("bucket", "demo"), &cav(&value), "t", "r")
+            let out = render_policy(TPL, &cav(&value), "t", "r")
                 .expect("render must succeed for a well-formed, present token");
             let v: Value = serde_json::from_str(&out).expect("output is valid json");
             let expected = format!("arn:aws:s3:::{value}/*");
@@ -628,7 +610,7 @@ mod proptests {
         fn value_cannot_alter_structure(value in evil_value()) {
             const TPL: &str =
                 r#"{"Statement":[{"Effect":"Allow","Resource":["arn:{{caveat.volume}}"]}]}"#;
-            let out = render_policy(TPL, &env_one("bucket", "demo"), &cav(&value), "t", "r")
+            let out = render_policy(TPL, &cav(&value), "t", "r")
                 .expect("render ok");
             let v: Value = serde_json::from_str(&out).expect("valid json");
             let stmts = v["Statement"].as_array().expect("statement array");
@@ -640,40 +622,36 @@ mod proptests {
             prop_assert_eq!(res[0].as_str(), Some(expected.as_str()));
         }
 
-        /// Three namespaces resolved in one render each land in their own
+        /// Two caveat values resolved in one render each land in their own
         /// slot, intact and independent — no value bleeds across slots.
         #[test]
         fn every_namespace_value_lands_in_its_own_slot(
-            e in evil_value(),
             a in evil_value(),
             c in evil_value(),
         ) {
-            const TPL: &str = r#"{"e":"{{env.x}}","a":"{{caveat.volume}}","c":"{{caveat.sub}}"}"#;
+            const TPL: &str = r#"{"a":"{{caveat.volume}}","c":"{{caveat.sub}}"}"#;
             let out = render_policy(
                 TPL,
-                &env_one("x", &e),
                 &[Caveat::scalar("volume", &a), Caveat::scalar("sub", &c)],
                 "t",
                 "r",
             )
             .expect("render ok");
             let v: Value = serde_json::from_str(&out).expect("valid json");
-            prop_assert_eq!(v["e"].as_str(), Some(e.as_str()));
             prop_assert_eq!(v["a"].as_str(), Some(a.as_str()));
             prop_assert_eq!(v["c"].as_str(), Some(c.as_str()));
         }
 
         /// A substituted value is emitted verbatim and never re-scanned: a
-        /// value that itself contains `{{env.bucket}}` stays literal text,
-        /// so the (differently-valued) real `env.bucket` never appears.
+        /// value that itself contains `{{caveat.sub}}` stays literal text,
+        /// so the (differently-valued) real `caveat.sub` never appears.
         #[test]
         fn substituted_values_are_not_rescanned(suffix in evil_value()) {
-            let value = format!("{{{{env.bucket}}}}{suffix}"); // literal "{{env.bucket}}" + suffix
+            let value = format!("{{{{caveat.sub}}}}{suffix}"); // literal "{{caveat.sub}}" + suffix
             const TPL: &str = r#"{"r":["{{caveat.volume}}"]}"#;
             let out = render_policy(
                 TPL,
-                &env_one("bucket", "SHOULD_NOT_APPEAR"),
-                &cav(&value),
+                &[Caveat::scalar("volume", &value), Caveat::scalar("sub", "SHOULD_NOT_APPEAR")],
                 "t",
                 "r",
             )

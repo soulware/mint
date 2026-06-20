@@ -1,7 +1,7 @@
 //! Configuration (`docs/design-mint.md` § *Mint configuration*). v1 is
 //! single-tenant, single-root-key.
 //!
-//! Audience, store, env, and role metadata are file-backed (TOML); the
+//! Audience, store, and role metadata are file-backed (TOML); the
 //! macaroon keyring is not config (loaded by [`crate::state::Store`]
 //! from `<data_dir>/root_keys/`). Each role's IAM-policy template lives in
 //! its own file under
@@ -57,8 +57,6 @@ pub enum ConfigError {
         #[source]
         source: std::net::AddrParseError,
     },
-    #[error("[env] key {key:?} is not a scalar (string, integer, float, or boolean)")]
-    NonScalarEnv { key: String },
     #[error(
         "[attestation.demo] enabled = true requires [auth.demo] enabled = true \
          (the issuer is gated on the demo login session)"
@@ -69,8 +67,6 @@ pub enum ConfigError {
          is configured to discharge it"
     )]
     AttestationWithoutLocation { role: String },
-    #[error("role {role}: template references env.{key} but [env] has no such key")]
-    UndefinedEnvKey { role: String, key: String },
     #[error("role {role}: policy template is not valid JSON: {source}")]
     PolicyNotJson {
         role: String,
@@ -184,12 +180,6 @@ pub struct RawConfig {
     #[serde(default)]
     pub ticket_ttl_seconds: Option<u64>,
     pub store: Store,
-    /// Flat table of operator-defined scalar values surfaced to role
-    /// policy templates as `{{env.X}}` (`docs/design-mint.md` §
-    /// *Templating*). Values must be scalars; nested tables/arrays are
-    /// rejected at load. Empty when the config omits `[env]`.
-    #[serde(default)]
-    pub env: BTreeMap<String, toml::Value>,
     /// The `[auth]` plane: the discharge `location` for the enroll /
     /// exchange / admin gates, plus the optional `[auth.demo]` colocation
     /// of the auth role. Absent ⟹ no auth plane.
@@ -284,7 +274,8 @@ pub struct RawDemoAttestation {
 pub struct Store {
     /// Bucket holding mint's own `_mint/*` state (the store bucket).
     /// Operational only — **not** a template surface; roles name the
-    /// bucket(s) they grant on via `[env]`.
+    /// bucket(s) they grant on as `{{caveat.X}}` (holder-supplied) or as
+    /// inlined literals in the policy template.
     pub bucket: String,
     /// S3 endpoint URL. Used by `serve --tigris` to build the
     /// data-plane client that reads and writes `_mint/*` under
@@ -351,21 +342,6 @@ impl AdminCredential {
 
 fn non_empty_env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
-}
-
-/// Coerce an `[env]` value to its template string form. `[env]` is a
-/// flat key→scalar table (`docs/design-mint.md` § *Templating*); arrays
-/// and nested tables are a config error.
-fn env_scalar_to_string(key: &str, value: &toml::Value) -> Result<String, ConfigError> {
-    match value {
-        toml::Value::String(s) => Ok(s.clone()),
-        toml::Value::Integer(i) => Ok(i.to_string()),
-        toml::Value::Float(f) => Ok(f.to_string()),
-        toml::Value::Boolean(b) => Ok(b.to_string()),
-        _ => Err(ConfigError::NonScalarEnv {
-            key: key.to_string(),
-        }),
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -561,11 +537,6 @@ pub struct Config {
     /// with an explicit `--bind` (the TCP single-host override).
     pub listener: Listener,
     pub store: Store,
-    /// Validated `[env]` values (`docs/design-mint.md` § *Templating*):
-    /// operator-defined scalars surfaced to role policies as `{{env.X}}`,
-    /// coerced to their string form. The only server-side substitution a
-    /// role policy reads.
-    pub env: BTreeMap<String, String>,
     /// Resolved from the AWS environment at load time. `None` when the
     /// env is unset. `mint serve` requires `Some`; tests that
     /// construct `Config` directly (and use `Store::open_local` /
@@ -803,16 +774,6 @@ impl Config {
         {
             return Err(ConfigError::DemoAttestationWithoutDemoAuth);
         }
-        // `[env]` values must be scalars; the env-key *surface* check
-        // (every `{{env.X}}` names a defined key) is deliberately **not**
-        // run here — it gates seal authoring, not config load, so a
-        // drifted local template never blocks a host from serving its
-        // already-sealed surface. See [`Config::validate_policy_surface`].
-        let mut env = BTreeMap::new();
-        for (key, value) in raw.env {
-            let scalar = env_scalar_to_string(&key, &value)?;
-            env.insert(key, scalar);
-        }
         Ok(Config {
             audience: raw.audience,
             data_dir,
@@ -820,7 +781,6 @@ impl Config {
             ticket_ttl_seconds,
             listener,
             store: raw.store,
-            env,
             admin: AdminCredential::from_env(),
             demo_auth,
             demo_attestation,
@@ -846,24 +806,22 @@ impl Config {
     ///    An engine-ism (`{{#each}}`), a namespace-less or empty token, or
     ///    an unterminated `{{` would fail the render closed; the lint
     ///    surfaces it at publish instead.
-    /// 3. Every `{{env.X}}` names a key present in `[env]` and every
-    ///    `{{mint.X}}` names a [`crate::template::MINT_KEYS`] value. (The
-    ///    attested↔caveat fencing — `attested ⊆ caveat`, and no attested
-    ///    name colliding with a reserved control name — is enforced at
-    ///    config load, since `attested` is no longer a template namespace.)
+    /// 3. Every `{{mint.X}}` names a [`crate::template::MINT_KEYS`] value.
+    ///    (The attested/holder↔caveat fencing — each a subset of `caveat`,
+    ///    disjoint from each other and from the reserved control names — is
+    ///    enforced at config load, since neither is a template namespace.)
     /// 4. The template's `{{caveat.X}}` tokens match the role's declared
     ///    `caveat` contract exactly (the full manifest, including the
-    ///    attestation-baked subset). A typo (`{{caveat.sb}}` vs declared
-    ///    `sub`) or a dropped binding (a template forgetting
-    ///    `{{caveat.sub}}`) fails at publish instead of silently
-    ///    mis-scoping a live credential. The declared set is what gets
-    ///    sealed and enforced at request time.
+    ///    attestation-baked and holder-supplied subsets). A typo
+    ///    (`{{caveat.sb}}` vs declared `sub`) or a dropped binding (a
+    ///    template forgetting `{{caveat.sub}}`) fails at publish instead of
+    ///    silently mis-scoping a live credential. The declared set is what
+    ///    gets sealed and enforced at request time.
     ///
     /// None is run at config load: the request path renders the sealed
     /// surface, decoupled from the live config, so a drifted local
     /// template must never block a host from serving its already-sealed
-    /// roles. Render-time strict mode is the final backstop if `[env]` is
-    /// later mutated to drop a key a sealed template uses.
+    /// roles. Render-time strict mode is the final backstop.
     pub fn validate_policy_surface(&self) -> Result<(), ConfigError> {
         for role in self.roles.values() {
             let doc =
@@ -880,16 +838,6 @@ impl Config {
                 });
             }
             let surface = crate::template::template_surface(&role.policy);
-            for path in &surface.env {
-                if let Some(key) = path.strip_prefix("env.")
-                    && !self.env.contains_key(key)
-                {
-                    return Err(ConfigError::UndefinedEnvKey {
-                        role: role.name.clone(),
-                        key: key.to_string(),
-                    });
-                }
-            }
             for path in &surface.mint {
                 let key = path.strip_prefix("mint.").unwrap_or(path);
                 if !crate::template::MINT_KEYS.contains(&key) {
@@ -1141,14 +1089,12 @@ policy_file = "coord-base.json"
         ));
     }
 
-    /// `[env]` block — env-table parsing, the scalar guard (load-time),
-    /// and the env-key surface check (seal-authoring gate).
-    const ENV_SAMPLE: &str = r#"
+    /// A minimal single-role config, for the seal-authoring surface checks
+    /// (the policy body is supplied per-test).
+    const SINGLE_ROLE_SAMPLE: &str = r#"
 audience = "mint"
 [store]
 bucket = "state-bucket"
-[env]
-bucket = "data-bucket"
 [[role]]
 name = "r"
 min_ttl_seconds = 60
@@ -1158,38 +1104,15 @@ policy_file = "r.json"
 "#;
 
     #[test]
-    fn env_values_are_parsed_and_separate_from_store() {
-        let c =
-            parse_for_test(ENV_SAMPLE, &[("r.json", r#"{"b":"{{env.bucket}}"}"#)]).expect("parse");
-        // The store bucket and the template-facing env bucket are
-        // independent values, even when set to the same string elsewhere.
-        assert_eq!(c.store.bucket, "state-bucket");
-        assert_eq!(c.env["bucket"], "data-bucket");
-        // A template referencing a defined key satisfies the seal gate.
-        assert!(c.validate_policy_surface().is_ok());
-    }
-
-    #[test]
-    fn undefined_env_key_passes_load_but_fails_seal_validation() {
-        // Config load tolerates a template referencing an undefined env
-        // key — serving renders the sealed surface, decoupled from the
-        // live config, so this must not block startup. The surface check
-        // that gates seal authoring is what rejects it.
-        let cfg = parse_for_test(ENV_SAMPLE, &[("r.json", r#"{"r":"{{env.region}}"}"#)])
-            .expect("load tolerates an undefined env-key reference");
-        assert!(matches!(
-            cfg.validate_policy_surface(),
-            Err(ConfigError::UndefinedEnvKey { key, .. }) if key == "region"
-        ));
-    }
-
-    #[test]
     fn malformed_token_passes_load_but_fails_seal_validation() {
         // An engine-ism the renderer would fail closed on is caught at
-        // seal authoring, not deferred to first render. Like the env-key
-        // check, config load tolerates it (serving is decoupled).
-        let cfg = parse_for_test(ENV_SAMPLE, &[("r.json", r#"{"r":"{{#each items}}"}"#)])
-            .expect("load tolerates a malformed token");
+        // seal authoring, not deferred to first render. Config load
+        // tolerates it (serving is decoupled from the live config).
+        let cfg = parse_for_test(
+            SINGLE_ROLE_SAMPLE,
+            &[("r.json", r#"{"r":"{{#each items}}"}"#)],
+        )
+        .expect("load tolerates a malformed token");
         assert!(matches!(
             cfg.validate_policy_surface(),
             Err(ConfigError::MalformedPolicyToken { token, .. }) if token == "{{#each items}}"
@@ -1200,8 +1123,11 @@ policy_file = "r.json"
     fn non_json_template_passes_load_but_fails_seal_validation() {
         // A token that escaped its string slot makes the template invalid
         // JSON; the seal gate rejects it before it can ever be rendered.
-        let cfg = parse_for_test(ENV_SAMPLE, &[("r.json", r#"{"r":[{{attested.volume}}]}"#)])
-            .expect("load tolerates a non-JSON template");
+        let cfg = parse_for_test(
+            SINGLE_ROLE_SAMPLE,
+            &[("r.json", r#"{"r":[{{attested.volume}}]}"#)],
+        )
+        .expect("load tolerates a non-JSON template");
         assert!(matches!(
             cfg.validate_policy_surface(),
             Err(ConfigError::PolicyNotJson { role, .. }) if role == "r"
@@ -1222,8 +1148,6 @@ policy_file = "r.json"
 audience = "mint"
 [store]
 bucket = "state-bucket"
-[env]
-bucket = "data-bucket"
 [[role]]
 name = "r"
 min_ttl_seconds = 60
@@ -1246,8 +1170,6 @@ audience = "mint"
 bucket = "state-bucket"
 [attestation]
 location = "https://a.example/v1/discharge"
-[env]
-bucket = "data-bucket"
 [[role]]
 name = "r"
 min_ttl_seconds = 60
@@ -1447,7 +1369,7 @@ intermediate_ttl_seconds = 0
         // The seal refuses to pin a template that drops the binding.
         let cfg = parse_for_test(
             &contract_toml(r#"caveat = ["sub"]"#),
-            &[("r.json", r#"{"r":"{{env.bucket}}/*"}"#)],
+            &[("r.json", r#"{"r":"literal-bucket/*"}"#)],
         )
         .expect("load tolerates a contract mismatch");
         assert!(matches!(
@@ -1469,16 +1391,6 @@ intermediate_ttl_seconds = 0
         assert!(matches!(
             cfg.validate_policy_surface(),
             Err(ConfigError::UnknownMintKey { key, .. }) if key == "bogus"
-        ));
-    }
-
-    #[test]
-    fn non_scalar_env_value_is_rejected() {
-        let bad = ENV_SAMPLE.replace(r#"bucket = "data-bucket""#, r#"bucket = ["a", "b"]"#);
-        let err = parse_for_test(&bad, &[("r.json", "{}")]);
-        assert!(matches!(
-            err,
-            Err(ConfigError::NonScalarEnv { key }) if key == "bucket"
         ));
     }
 

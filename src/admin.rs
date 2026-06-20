@@ -374,10 +374,12 @@ async fn handle_seal(State(state): State<AppState>, headers: HeaderMap, body: By
         Resolved::Absent | Resolved::Unsatisfiable => "unknown".to_string(),
     };
 
-    // A seal must not pin templates that reference undefined `[env]`
-    // values — refuse to publish one (the host keeps serving whatever it
-    // serves now). Not enforced at config load: serving is decoupled from
-    // the live config, so this is the right gate.
+    // A seal must not pin templates that fail the surface checks (a
+    // malformed token, an unknown `{{mint.X}}`, or a `{{caveat.X}}` set
+    // that doesn't match the declared contract) — refuse to publish one
+    // (the host keeps serving whatever it serves now). Not enforced at
+    // config load: serving is decoupled from the live config, so this is
+    // the right gate.
     if let Err(e) = state.config.validate_policy_surface() {
         return unprocessable(&e.to_string());
     }
@@ -439,8 +441,8 @@ fn service_unavailable(reason: &str) -> Response {
 }
 
 /// `422` for an operator config defect surfaced at seal authoring (e.g. a
-/// template referencing an undefined `[env]` key). The `reason` is
-/// operator-facing — this is the authenticated admin plane.
+/// template whose `{{caveat.X}}` tokens don't match the declared contract).
+/// The `reason` is operator-facing — this is the authenticated admin plane.
 fn unprocessable(reason: &str) -> Response {
     (
         StatusCode::UNPROCESSABLE_ENTITY,

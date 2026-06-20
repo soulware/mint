@@ -1,20 +1,21 @@
 # Minimal demo config (docs/design-mint.md § "Reference client & demo").
 #
-# Two roles, together exercising the env, mint, and caveat namespaces.
-# `demo` is a plain key-bound role over a single server-side {{env.prefix}}
-# ({{env.X}} + {{mint.expiry}} only, no contract, no TPC). `demo-attested`
-# adds the caveat namespace: its policy substitutes {{caveat.sub}}
-# (MAC-verified) and {{caveat.path}} (attestation-sourced), and its
-# credential carries an attested third-party caveat, so assume-role is
-# refused until the client fetches a discharge from the demo attestation
-# authority.
+# Two roles that together exercise every caveat provenance. `demo` scopes a
+# credential to a bucket the caller names at exchange (holder-supplied) under
+# their own identity (issuer-stamped). `demo-attested` adds an
+# attestation-sourced `project`: its credential carries an attested
+# third-party caveat, so assume-role is refused until the client fetches a
+# discharge from the demo attestation authority. Both also use the
+# mint-computed `{{mint.expiry}}`.
 #
 # The per-role policy templates live under roles_dir (examples/demo_roles/).
+# A per-request scope value is a {{caveat.X}} (its provenance declared in the
+# role's [role.template] below); a true deployment constant is written into
+# the policy JSON as a literal.
 #
 # `mint serve` always talks to a real S3-compatible backend (Tigris,
 # MinIO, AWS). Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY in the
-# environment before starting, and point `store.bucket` / `env.bucket`
-# at a bucket you own.
+# environment before starting, and point `store.bucket` at a bucket you own.
 
 audience = "mint"
 
@@ -68,36 +69,46 @@ bucket = "mint-demo"
 # endpoint = "https://t3.storage.dev"   # default; set for non-Tigris S3
 # region   = "us-east-1"                # default
 
-# Values surfaced to role policy templates as `{{env.X}}`. Flat scalars
-# only; nested tables/arrays are rejected. The demo roles reference
-# `{{env.bucket}}` and `{{env.prefix}}` — both reach a template only by
-# being restated here.
-[env]
-bucket = "mint-demo"
-prefix = "images"
+# A policy template pulls from two namespaces — `{{caveat.X}}` (MAC-verified)
+# and `{{mint.X}}` (mint-computed) — plus literal text for true deployment
+# constants. A `{{caveat.X}}` value reaches the credential by one of three
+# provenances, declared per role:
+#   - issuer-stamped       — mint sets it from the principal (e.g. `sub`).
+#   - holder-supplied      — the client fixes it at exchange (`--caveat X=V`),
+#                            listed in `holder` (⊆ `caveat`).
+#   - attestation-sourced  — an authority vouches for it at finalize
+#                            (`--attest X=V`), listed in `attested` (⊆ `caveat`).
+# The two roles below together exercise all three.
 
-# Every template value is MAC-verified or server-side — there is no
-# self-asserted request scoping. `demo` references only `{{env.X}}` and
-# `{{mint.expiry}}`, so it needs no `[role.template]` contract;
-# `demo-attested` declares its caveat/attested contract below.
-
+# `demo` — holder + issuer. The caller names a `bucket` at exchange and the
+# credential is scoped to their own `sub` prefix within it; no attestation.
+#   mint client exchange --caveat bucket=acme-data demo
 [[role]]
 name = "demo"
 min_ttl_seconds = 60
 max_ttl_seconds = 3600
 default_ttl_seconds = 900
+[role.template]
+# The full manifest of `{{caveat.X}}` the policy substitutes. `bucket` is
+# holder-supplied (below); `sub` is issuer-stamped.
+caveat = ["bucket", "sub"]
+# Names the client fixes in the PoP-signed exchange body (⊆ caveat). mint
+# bakes them verbatim — their scope is contained by this deployment's IAM
+# account boundary, so a holder cannot widen past what the account allows.
+holder = ["bucket"]
 
+# `demo-attested` — adds the attested layer. Same holder `bucket` and issuer
+# `sub`, plus a `project` an authority must vouch for before assume-role.
+#   mint client exchange --caveat bucket=acme-data --attest project=apollo demo-attested
 [[role]]
 name = "demo-attested"
 min_ttl_seconds = 60
 max_ttl_seconds = 900
 default_ttl_seconds = 300
-
-# The full manifest of `{{caveat.X}}` the policy template substitutes —
-# whatever the provenance. `path` is attestation-sourced (declared below);
-# `sub` is issuer-stamped. Attested names must be a subset of this.
 [role.template]
-caveat = ["path", "sub"]
+# `bucket` holder-supplied, `project` attestation-sourced, `sub` issuer-stamped.
+caveat = ["bucket", "project", "sub"]
+holder = ["bucket"]
 
 # Marks the role attested: its credential carries an attested third-party
 # caveat the authority discharges at `exchange-finalize`, where the
@@ -108,7 +119,7 @@ caveat = ["path", "sub"]
 # role (a discharge is still required, but no value is baked).
 [role.attestation]
 # mode = "demo-attested"
-attested = ["path"]
+attested = ["project"]
 # Lifetime, in seconds, of the `op=exchange-finalize` intermediate handed
 # back at `enroll-exchange` (step 1). Required on every attested role. `0` ⟹
 # the intermediate carries no `exp`: the holder keeps it and finalizes

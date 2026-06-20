@@ -41,8 +41,6 @@ audience = "mint"
 bucket = "demo-bucket"
 [attestation]
 location = "https://coord-b.example/v1/discharge"
-[env]
-bucket = "demo-bucket"
 [[role]]
 name = "volume-ro"
 min_ttl_seconds = 60
@@ -63,7 +61,7 @@ const POLICY: &str = r#"
     "Effect": "Allow",
     "Action": ["s3:GetObject"],
     "Resource": [
-      "arn:aws:s3:::{{env.bucket}}/by_id/{{caveat.volume}}/*"
+      "arn:aws:s3:::demo-bucket/by_id/{{caveat.volume}}/*"
     ],
     "Condition": {"DateLessThan": {"aws:CurrentTime": "{{mint.expiry}}"}}
   }]
