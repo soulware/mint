@@ -53,9 +53,9 @@ pub enum EnrollError {
     Unsatisfiable,
 }
 
-/// A source-stamped caveat baked into a credential at exchange — a
-/// holder-supplied value (fixed at `enroll-exchange`) or a discharged
-/// attested value (resolved at `exchange-finalize`).
+/// An attested `(name, value)` baked into a credential at `exchange-finalize`
+/// — a non-reserved caveat the caller proposed and the attestation authority
+/// vouched in its discharge, stamped as an ordinary MAC'd scalar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BakedCaveat {
     pub name: String,
@@ -141,9 +141,9 @@ pub fn mint_credential_ticket(
     base.attenuate(tpc)
 }
 
-/// The attested third-party caveat to stamp onto a credential whose role
-/// declares `[role.attestation]` (`docs/design-mint.md` § *Attestation
-/// contract*).
+/// The attested third-party caveat stamped onto the `exchange-finalize`
+/// intermediate of an attested role — one whose template binds a non-reserved
+/// caveat (`docs/design-mint.md` § *Attestation contract*).
 /// `role` is the role name, carried verbatim into the CID for the
 /// discharging authority at `location` (which keys its verdict off it);
 /// the CID is sealed under `K_M-B` with a fresh per-caveat `r`, so the
@@ -169,15 +169,13 @@ pub struct AttestedTpc<'a> {
 /// revoke bumps the enrolled record's epoch, so a credential minted
 /// before it carries a now-stale value and can never clear again.
 ///
-/// `baked` carries the credential's source-stamped `(name, value)` pairs —
-/// the holder-supplied caveats fixed at exchange (from the PoP-signed
-/// `enroll-exchange` body) and, for a role declaring `[role.attestation]`,
-/// the attestation-sourced values resolved from the authority's discharge at
-/// `POST /v1/exchange-finalize`. Both are stamped here as ordinary MAC'd
-/// scalar caveats — point-in-time, indistinguishable thereafter from the
+/// `baked` carries the attested `(name, value)` pairs — for an attested role,
+/// the non-reserved values the authority vouched in its discharge, resolved at
+/// `POST /v1/exchange-finalize`. They are stamped here as ordinary MAC'd scalar
+/// caveats — point-in-time, indistinguishable thereafter from the
 /// issuer-stamped `sub` and rendered through `{{caveat.X}}`. The credential
-/// carries **no** third-party caveat: `assume-role` is a pure render. A role
-/// declaring neither source passes `&[]`.
+/// carries **no** third-party caveat: `assume-role` is a pure render. An
+/// issuer-only role has nothing to bake and passes `&[]`.
 pub fn mint_credential(
     keyring: &Keyring,
     audience: &str,
