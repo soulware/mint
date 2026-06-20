@@ -172,48 +172,48 @@ permissive-authority case.
 client-proposed value now, and it always goes to the authority. An
 issuer-only role takes no value flags.
 
-## Demo mode: the do-nothing discharge
+## Demo mode: a co-located authority, like auth
 
 In production the attestation authority is a separate party that holds `K_M-B`
-and decides verdicts mint cannot. The demo authority models that with a
-colocated stub on its own socket (`attest.sock`) sharing an auto-generated
-`K_M-B` — ceremony around a separation that, in demo, does not exist: mint *is*
-the authority. Fly's "do-nothing" third-party caveat names the shortcut — the
-issuer "could make a 'do-nothing' 3P caveat … by coming up with a random URL,
-`KA` and `r`, and then using them to mint a discharge Macaroon at the same
-time." In demo mode mint is exactly that issuer.
+and decides verdicts mint cannot. The demo models that **exactly as the demo
+auth role already does**: a co-located authority living *in mint's process*,
+holding an auto-generated `K_M-B`, served on its own socket (`attest.sock`)
+alongside `auth.sock`. The client reaches it the way it reaches the auth
+discharge plane — by *calling* it with a login session — and holds no `K_M-*`
+key itself. The two co-located demo authorities share that one login session as
+their gate, which is why `[attestation.demo]` requires `[auth.demo]`
+(`config.rs`, `DemoAttestationWithoutDemoAuth`).
 
-Two things make this cleaner than the colocated stub:
+An earlier draft proposed collapsing this into a "do-nothing" in-process
+discharge — dropping `K_M-B` and `attest.sock` and having mint (recovering `r`
+from the VID) or the client mint the discharge directly, on Fly's aside that an
+issuer "could make a 'do-nothing' 3P caveat … and mint a discharge Macaroon at
+the same time." That is **not** the design. Two facts rule it out:
 
-1. **No shared key.** `K_M-B` exists *only* to let a chain-blind third party
-   recover the discharge root `r` from the CID. mint is not chain-blind — it
-   recovers `r` from the **VID** under its own chain tag, the same way it does
-   when verifying the discharge at finalize. So a mint-issued discharge needs
-   no `K_M-B` at all. **Demo mode stops generating `K_M-B`.** The CID is still
-   stamped — the credential's shape is unchanged — it just isn't the path mint
-   takes to `r`.
-2. **No second socket.** Because mint already holds everything needed to mint
-   the discharge, the client never dials a separate authority. The do-nothing
-   discharge is produced in-process, gated behind `[attestation.demo]` exactly
-   as the colocated stub is today.
+1. **A client must never hold a `K_M-*` key.** The codebase keeps this
+   invariant throughout: `K_M-A` is server-side only — mint stamps CIDs with
+   it, the auth service decrypts them, and the client gets discharges by
+   *calling* that service over a session-gated socket, holding a session and
+   never the key (`client.rs` / `session.rs` name no `K_M-*`). Letting a demo
+   client read `K_M-B` to self-discharge would be the first crack in that
+   invariant, cut for a demo affordance. So the discharge stays with a
+   co-located authority that holds `K_M-B`; the client calls it.
+2. **mint stays a pure verifier.** mint issues the third-party caveat and
+   verifies the discharge at `exchange-finalize`; it does not mint discharges.
+   Folding a do-nothing discharge into mint's request path would bend a
+   production endpoint's contract to a demo shortcut. Keeping the authority on
+   `attest.sock` leaves `enroll-exchange` / `exchange-finalize` byte-identical
+   between demo and production.
 
-**Value timing.** A client's attested values arrive after the intermediate is
-minted — in the request that, in production, goes to the authority. So the
-do-nothing discharge is minted once those values are in hand: mint recovers `r`
-from the presented intermediate's VID and mints the matching discharge over the
-proposed values, then bakes. `mint serve` runs the whole exchange locally with
-no `attest.sock` and no key material beyond the root keyring.
-
-**Production is unchanged.** The real split stays: a separate authority holds
-`K_M-B`, recovers `r` from the CID (it has no chain), and decides the verdict
-independently. The do-nothing path is strictly a demo affordance, gated like
-the rest of `[attestation.demo]`.
-
-**Keep one real-authority test.** To keep production's "fetch a discharge from
-a chain-blind party over the transport" path covered, retain a single
-integration test that stands up a genuinely separate stub authority over a
-socket (CID + `K_M-B` + a discharge round-trip) — even though that is no longer
-the default `mint serve` experience.
+Fly's "do-nothing" line is a casual one ("just for funsies") and does not
+anticipate late-bound attested values proposed per-finalize. The load-bearing
+idea we keep from it is only that *the verifier cannot distinguish a co-located
+authority from a remote one* — which holds here: the demo authority is a
+faithful scaled-down coord-B (same TPC, same `CID`-under-`K_M-B`, same discharge
+round-trip over a socket), differing only in that the party answering
+`attest.sock` is in mint's process rather than on a separate host. Production's
+"fetch a discharge over a transport" path is therefore exercised by the default
+demo itself, not a special-cased test.
 
 ## Consequences
 
@@ -235,9 +235,9 @@ The costs are real:
    trust point — but it relocates the decision.
 4. **The demo changes shape.** The two roles (holder `demo`, attested
    `demo-attested`) collapse. A cleaner demo: one issuer-only role
-   (sub-scoped, no authority) and one attested role whose value the in-process
-   do-nothing discharge vouches (see *Demo mode* above) — showcasing the two
-   real provenances with no second socket.
+   (sub-scoped, no authority) and one attested role whose value the co-located
+   attestation authority vouches (on `attest.sock`, see *Demo mode* above) —
+   showcasing the two real provenances.
 
 ## Decisions
 
@@ -273,8 +273,7 @@ A sensible sequence:
    `intermediate_ttl_seconds` and make the attested intermediate always
    durable. The seal pins `ttl_seconds`; `authorize` grants it clamped to the
    presented macaroon's `exp`.
-4. **Demo, config, and docs.** Replace the colocated `attest.sock` stub with
-   the in-process do-nothing discharge (drop demo `K_M-B`); rewrite the demo
-   roles (issuer-only + attested), the seal/validation, README, and CLAUDE.md
-   to the two-provenance vocabulary; keep one separate-authority transport
-   test.
+4. **Demo, config, and docs.** Keep the colocated attestation authority on
+   `attest.sock` (it mirrors `auth.sock`, holds `K_M-B`, and is gated by the
+   demo login session); rewrite the demo roles (issuer-only + attested), the
+   seal/validation, README, and CLAUDE.md to the two-provenance vocabulary.
