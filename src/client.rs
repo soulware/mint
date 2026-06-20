@@ -342,17 +342,9 @@ pub async fn exchange(
     in_file: &str,
     role: &str,
     out: &str,
-    caveat: &[String],
-    attest: &[String],
+    values: &[String],
 ) -> Result<bool, ClientError> {
     let sk = load_key(dir)?;
-    // Holder-supplied caveats fixed into this exchange (e.g. `bucket`): mint
-    // bakes them verbatim per the role's sealed `holder` contract. Distinct
-    // from `--attest` (the attestation authority's vocabulary, step 2).
-    let holder: std::collections::BTreeMap<String, String> = parse_caveats(caveat)?
-        .into_iter()
-        .map(CaveatArg::into_pair)
-        .collect();
     let in_path = dir.join(in_file);
     let ticket = Macaroon::decode(read_text(&in_path, "run `mint client enroll …` first")?.trim())
         .map_err(|_| ClientError::BadFile("credential ticket"))?;
@@ -371,7 +363,6 @@ pub async fn exchange(
     let body = serde_json::json!({
         "ts": now_unix(),
         "role": role,
-        "caveats": holder,
     })
     .to_string();
     let (status, text) = post_bundle(
@@ -388,17 +379,18 @@ pub async fn exchange(
             let received = json_field(&text, "credential")?;
             let m = Macaroon::decode(&received).map_err(|_| ClientError::BadFile("credential"))?;
             // An attested role returns a short-lived `op=exchange-finalize`
-            // intermediate, not the credential: discharge its attested
-            // caveat and finalize (step 2) to bake the attested values in.
-            // Every other role returns the credential directly.
+            // intermediate, not the credential: propose the role's caveat
+            // values to the attestation authority, discharge its TPC, and
+            // finalize (step 2) to bake them in. An issuer-only role returns
+            // the credential directly and takes no values.
             let credential = if scalar_value(&m, name::OP).as_deref() == Some(op::EXCHANGE_FINALIZE)
             {
                 eprintln!(
                     "  ← 200 — mint issued a short-lived intermediate for attested role `{role}`:"
                 );
                 describe("intermediate (step 1 of 2)", &m);
-                let attest = parse_caveats(attest)?;
-                finalize_attested(base_url, &m, &attest, &sk).await?
+                let values = parse_caveats(values)?;
+                finalize_attested(base_url, &m, &values, &sk).await?
             } else {
                 eprintln!(
                     "  ← 200 — mint re-minted a credential from its root (a fresh chain, not an attenuation of the ticket):"
@@ -432,17 +424,17 @@ fn scalar_value(m: &Macaroon, name: &str) -> Option<String> {
     }
 }
 
-/// Step 2 of an attested exchange: discharge the intermediate's attested
-/// third-party caveat (attesting the `--attest` pairs) and present the
-/// bundle to `POST /v1/exchange-finalize`, which bakes the attested values
-/// into the final credential. Returns the encoded credential.
+/// Step 2 of an attested exchange: propose the role's caveat values to the
+/// attestation authority, discharge the intermediate's third-party caveat,
+/// and present the bundle to `POST /v1/exchange-finalize`, which bakes the
+/// vouched values into the final credential. Returns the encoded credential.
 async fn finalize_attested(
     base_url: &str,
     intermediate: &Macaroon,
-    attest: &[CaveatArg],
+    values: &[CaveatArg],
     sk: &SigningKey,
 ) -> Result<String, ClientError> {
-    let discharges = attest_discharges(intermediate, attest).await?;
+    let discharges = attest_discharges(intermediate, values).await?;
     eprintln!(
         "  → POST {base_url}/v1/exchange-finalize  (signed with your client key — proof-of-possession)"
     );
@@ -467,9 +459,8 @@ async fn finalize_attested(
     Ok(credential)
 }
 
-/// A parsed `NAME=VALUE` CLI argument — a holder-supplied value
-/// (`exchange --caveat`) or a value for the attestation authority
-/// (`exchange --attest`).
+/// A parsed `NAME=VALUE` CLI argument — a caveat value the client proposes
+/// at `exchange` (`--caveat`), vouched by the attestation authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CaveatArg {
     name: String,
@@ -568,7 +559,7 @@ pub async fn assume_role(
 /// list without touching either.
 async fn attest_discharges(
     credential: &Macaroon,
-    attest: &[CaveatArg],
+    values: &[CaveatArg],
 ) -> Result<Vec<Macaroon>, ClientError> {
     let has_tpc = credential
         .caveats()
@@ -577,16 +568,14 @@ async fn attest_discharges(
     if !has_tpc {
         return Ok(Vec::new());
     }
-    // The authority refuses an empty attestation (`nothing to attest`);
-    // An empty `--attest` is not pre-rejected here: a gate-only role
-    // (empty `attested` contract) legitimately discharges its TPC with no
-    // values. A values-required role that is handed none gets a clean 400
-    // from `exchange-finalize` (the client does not hold the contract, so
-    // it cannot tell the two apart up front).
+    // The client proposes the role's caveat values; the authority vouches
+    // them into the discharge. The client does not hold the role's contract,
+    // so it cannot tell up front which values the role requires — a
+    // mismatch surfaces as a clean 400 from `exchange-finalize`.
     let session = crate::session::load_session()?;
     let transport = crate::session::load_attest_transport()?;
-    let attested: std::collections::BTreeMap<String, String> =
-        attest.iter().cloned().map(CaveatArg::into_pair).collect();
+    let caveats: std::collections::BTreeMap<String, String> =
+        values.iter().cloned().map(CaveatArg::into_pair).collect();
     let mut discharges = Vec::new();
     for c in credential.caveats() {
         let Caveat::ThirdParty { location, cid, .. } = c else {
@@ -598,7 +587,7 @@ async fn attest_discharges(
         );
         let body = serde_json::to_string(&crate::attest::AttestRequest {
             cid: BASE64.encode(cid),
-            attested: attested.clone(),
+            caveats: caveats.clone(),
         })
         .map_err(|_| ClientError::BadRequest("attest body"))?;
         let headers = [

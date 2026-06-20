@@ -4,7 +4,7 @@
     "Sid": "Demo",
     "Effect": "Allow",
     "Action": ["s3:GetObject"],
-    "Resource": ["arn:aws:s3:::{{caveat.bucket}}/{{caveat.sub}}/*"],
+    "Resource": ["arn:aws:s3:::mint-demo/{{caveat.sub}}/*"],
     "Condition": {
       "DateLessThan": {"aws:CurrentTime": "{{mint.expiry}}"}
     }

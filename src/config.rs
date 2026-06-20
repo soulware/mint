@@ -63,10 +63,20 @@ pub enum ConfigError {
     )]
     DemoAttestationWithoutDemoAuth,
     #[error(
-        "role {role}: declares [role.attestation] but no [attestation].location \
-         is configured to discharge it"
+        "role {role}: binds a non-reserved caveat (so it is attested) but no \
+         [attestation].location is configured to discharge it"
     )]
     AttestationWithoutLocation { role: String },
+    #[error(
+        "role {role}: is attested (binds a non-reserved caveat) but has no \
+         intermediate_ttl_seconds — the intermediate's lifetime must be explicit"
+    )]
+    MissingIntermediateTtl { role: String },
+    #[error(
+        "role {role}: sets intermediate_ttl_seconds but is issuer-only (binds no \
+         non-reserved caveat), so it has no intermediate to bound"
+    )]
+    UnexpectedIntermediateTtl { role: String },
     #[error("role {role}: policy template is not valid JSON: {source}")]
     PolicyNotJson {
         role: String,
@@ -79,40 +89,6 @@ pub enum ConfigError {
          mint-computed value"
     )]
     UnknownMintKey { role: String, key: String },
-    #[error(
-        "role {role}: declared attested name {key:?} collides with a reserved \
-         control-caveat name"
-    )]
-    ReservedAttestedKey { role: String, key: String },
-    #[error(
-        "role {role}: [role.attestation] attested name {key:?} is not in \
-         [role.template] caveat (attested must be a subset of caveat)"
-    )]
-    AttestedNotInCaveat { role: String, key: String },
-    #[error(
-        "role {role}: declared holder name {key:?} collides with a reserved \
-         control-caveat name"
-    )]
-    ReservedHolderKey { role: String, key: String },
-    #[error(
-        "role {role}: [role.template] holder name {key:?} is not in caveat \
-         (holder must be a subset of caveat)"
-    )]
-    HolderNotInCaveat { role: String, key: String },
-    #[error(
-        "role {role}: name {key:?} is declared as both holder-supplied and \
-         attested — a caveat has exactly one source"
-    )]
-    SourceConflict { role: String, key: String },
-    #[error(
-        "role {role}: declared caveat names {declared:?} do not match the \
-         template's {{{{caveat.X}}}} tokens {used:?}"
-    )]
-    CaveatContractMismatch {
-        role: String,
-        declared: Vec<String>,
-        used: Vec<String>,
-    },
 }
 
 /// Normalise a declared field set (`attested`/`caveat`) to a canonical sorted,
@@ -357,72 +333,25 @@ pub struct RawRole {
     /// (so a role `name` with a path separator is rejected too).
     #[serde(default)]
     pub policy_file: Option<String>,
-    /// The role's substitution contract — the `[role.template]` subtable
-    /// declaring which `attested.*` and `caveat.*` namespaces the policy
-    /// template consumes. Absent = the empty contract.
-    #[serde(default)]
-    pub template: RawTemplate,
-    /// The `[role.attestation]` subtable. Present ⟹ a credential for
-    /// this role carries an attested third-party caveat that the
-    /// attestation authority (`attestation_location`) must discharge.
-    /// Absent ⟹ no attested caveat (the uniform key-bound credential).
-    #[serde(default)]
-    pub attestation: Option<RawRoleAttestation>,
-}
-
-/// The `[role.attestation]` subtable: a role's attested-caveat contract.
-#[derive(Debug, Deserialize)]
-pub struct RawRoleAttestation {
-    /// The names the attestation authority must attest at
-    /// `exchange-finalize`; their discharged values are baked into the
-    /// credential as ordinary MAC'd caveats (resolved by the template as
-    /// `{{caveat.X}}`, not a separate namespace). Must be a **subset of**
-    /// [`RawTemplate::caveat`] and disjoint from the reserved control names
-    /// ([`crate::caveat::name::RESERVED`]). Empty (the default) ⟹ a
-    /// gate-only role: a discharge is still required to finalize, but no
-    /// value is baked.
-    #[serde(default)]
-    pub attested: Vec<String>,
     /// Lifetime, in seconds, of the `op=exchange-finalize` intermediate
     /// handed back at `enroll-exchange` (step 1). It stamps the
     /// intermediate's `exp`, bounding how long the holder may discharge and
     /// finalize it. **`0` ⟹ no `exp`**: the intermediate never expires, so
     /// the holder keeps it and finalizes per-use for its lifetime (TOML has
-    /// no nil, so `0` is the no-expiry value). Required on every attested
-    /// role — the intermediate's lifetime is always an explicit, visible
-    /// choice.
+    /// no nil, so `0` is the no-expiry value).
+    ///
+    /// Required on (and only on) an **attested** role — one whose policy
+    /// template binds a non-reserved `{{caveat.X}}`, so its credential
+    /// carries an attested third-party caveat. An issuer-only role (only
+    /// reserved caveats) has no intermediate and must omit it. The
+    /// intermediate's lifetime is always an explicit, visible choice.
     ///
     /// A no-`exp` intermediate is still bounded by the attestation key: its
     /// TPC binds to the current `K_M-B`, so a `K_M-B` rotation makes
     /// outstanding intermediates undischargeable and the holder re-enrolls
     /// to mint a fresh one.
-    pub intermediate_ttl_seconds: u64,
-}
-
-/// The `[role.template]` subtable: the `caveat.*` names a role's policy
-/// template substitutes (`docs/design-mint.md` § *Templating*). Declared
-/// here, cross-checked at seal authoring against the template's actual
-/// `{{caveat.X}}` tokens (exact match), sealed into
-/// [`crate::seal::SealedRole`], and enforced at request time before render.
-#[derive(Debug, Default, Deserialize)]
-pub struct RawTemplate {
-    /// The `caveat.*` MAC-verified names the template binds — the full
-    /// manifest of `{{caveat.X}}` tokens, whatever their provenance:
-    /// issuer-stamped control names (e.g. `sub`), holder-supplied
-    /// values ([`holder`](Self::holder)), and the attestation-sourced names
-    /// baked at `exchange-finalize` ([`RawRoleAttestation::attested`]).
-    /// Each non-issuer name is declared in exactly one of those two
-    /// subsets. Absent = the empty set.
     #[serde(default)]
-    pub caveat: Vec<String>,
-    /// The `caveat.*` names the client supplies in the PoP-signed
-    /// `enroll-exchange` body and mint bakes verbatim into the credential
-    /// (provenance `holder`). A subset of [`caveat`](Self::caveat), disjoint
-    /// from [`RawRoleAttestation::attested`] and from the reserved control
-    /// names ([`crate::caveat::name::RESERVED`]) a client may not
-    /// self-assert. Absent = no holder-supplied caveats.
-    #[serde(default)]
-    pub holder: Vec<String>,
+    pub intermediate_ttl_seconds: Option<u64>,
 }
 
 /// Resolved listener transport — a per-deployment-shape choice, not a
@@ -568,21 +497,20 @@ pub struct Role {
     /// The role's IAM-policy JSON template, read from
     /// [`policy_path`](Role::policy_path) at load.
     pub policy: String,
-    /// The role's declared substitution contract: the `attested.*` and
-    /// `caveat.*` names its template substitutes. Sorted and de-duplicated
-    /// at load so the sealed form is canonical regardless of authoring
-    /// order. Cross-checked against the template at seal authoring
-    /// ([`Config::validate_policy_surface`]) and enforced at request time.
+    /// The **attested** caveat names — the non-reserved `{{caveat.X}}` the
+    /// template binds, vouched by the attestation authority and baked at
+    /// `exchange-finalize`. Derived from the template (every non-reserved
+    /// token), sorted and de-duplicated. Empty ⟹ an issuer-only role.
     pub attested: Vec<String>,
+    /// The full manifest of `{{caveat.X}}` names the template substitutes,
+    /// whatever their provenance — the attested names above plus the
+    /// issuer-stamped reserved names (e.g. `sub`). Derived from the
+    /// template, sorted and de-duplicated, sealed into
+    /// [`crate::seal::SealedRole`], and enforced at request time before
+    /// render (every name must resolve to a MAC'd value).
     pub caveat: Vec<String>,
-    /// The subset of [`caveat`](Role::caveat) the client supplies in the
-    /// `enroll-exchange` body, baked verbatim into the credential
-    /// (provenance `holder`). Disjoint from [`attested`](Role::attested)
-    /// and from the reserved control names. Sorted and de-duplicated at
-    /// load; sealed into [`crate::seal::SealedRole`].
-    pub holder: Vec<String>,
     /// The `op=exchange-finalize` intermediate's lifetime in seconds, from
-    /// `[role.attestation].intermediate_ttl_seconds` — `Some` exactly when
+    /// the role's top-level `intermediate_ttl_seconds` — `Some` exactly when
     /// the role is attested (the intermediate only exists for attested
     /// roles), `None` otherwise. `Some(0)` ⟹ the intermediate carries no
     /// `exp` and is held for the holder's lifetime; `Some(n>0)` ⟹ it
@@ -592,13 +520,12 @@ pub struct Role {
 }
 
 impl Role {
-    /// `true` when the role declares `[role.attestation]`: its credential
-    /// carries an attested third-party caveat keyed by the role name, so
-    /// exchange is two-step (intermediate → discharge → finalize). The
-    /// intermediate only exists for attested roles, so its lifetime field
-    /// is the canonical marker.
+    /// `true` when the role binds a non-reserved `{{caveat.X}}`: its
+    /// credential carries an attested third-party caveat, so exchange is
+    /// two-step (intermediate → discharge → finalize). Equivalently, the
+    /// attested set — every non-reserved template token — is non-empty.
     pub fn is_attested(&self) -> bool {
-        self.intermediate_ttl_seconds.is_some()
+        !self.attested.is_empty()
     }
 }
 
@@ -658,66 +585,45 @@ impl Config {
                 Some(ref f) => read_policy(&roles_dir, &r.name, f, true)?,
                 None => read_policy(&roles_dir, &r.name, &format!("{}.json", r.name), false)?,
             };
-            // A role that asks for an attested caveat needs an authority
-            // to discharge it; minting an undischargeable credential
-            // would be a silent dead-credential trap, so reject at load.
-            if r.attestation.is_some() && attestation_location.is_none() {
-                return Err(ConfigError::AttestationWithoutLocation {
-                    role: r.name.clone(),
-                });
-            }
-            let caveat = canonical_field_set(r.template.caveat);
-            let (attested, intermediate_ttl_seconds) = match r.attestation {
-                None => (Vec::new(), None),
-                Some(a) => (
-                    canonical_field_set(a.attested),
-                    Some(a.intermediate_ttl_seconds),
-                ),
+            // Provenance is derived from the template, never declared. The
+            // caveat manifest is exactly the `{{caveat.X}}` tokens the policy
+            // binds; a reserved name (`sub`, …) is issuer-stamped, every
+            // other name is attested (the authority vouches it at finalize).
+            let caveat = canonical_field_set(strip_ns(
+                &crate::template::template_surface(&policy).caveat,
+                "caveat.",
+            ));
+            let attested: Vec<String> = caveat
+                .iter()
+                .filter(|n| !crate::caveat::name::RESERVED.contains(&n.as_str()))
+                .cloned()
+                .collect();
+            // An attested role (one binding a non-reserved caveat) needs both
+            // an authority to discharge its TPC and an explicit intermediate
+            // lifetime; an issuer-only role has neither. Either mismatch is a
+            // silent dead-credential trap, so fail closed at load.
+            let intermediate_ttl_seconds = if attested.is_empty() {
+                if r.intermediate_ttl_seconds.is_some() {
+                    return Err(ConfigError::UnexpectedIntermediateTtl {
+                        role: r.name.clone(),
+                    });
+                }
+                None
+            } else {
+                if attestation_location.is_none() {
+                    return Err(ConfigError::AttestationWithoutLocation {
+                        role: r.name.clone(),
+                    });
+                }
+                match r.intermediate_ttl_seconds {
+                    Some(ttl) => Some(ttl),
+                    None => {
+                        return Err(ConfigError::MissingIntermediateTtl {
+                            role: r.name.clone(),
+                        });
+                    }
+                }
             };
-            // The attested names are baked as ordinary caveats and resolved
-            // by the template as `{{caveat.X}}`, so each must be a declared
-            // caveat slot (subset of `caveat`) and — being a baked caveat —
-            // disjoint from the reserved control names, which a discharge
-            // can never carry ([`crate::caveat::name::RESERVED`]).
-            for key in &attested {
-                if crate::caveat::name::RESERVED.contains(&key.as_str()) {
-                    return Err(ConfigError::ReservedAttestedKey {
-                        role: r.name.clone(),
-                        key: key.clone(),
-                    });
-                }
-                if !caveat.contains(key) {
-                    return Err(ConfigError::AttestedNotInCaveat {
-                        role: r.name.clone(),
-                        key: key.clone(),
-                    });
-                }
-            }
-            // Holder caveats are copied verbatim from the exchange body, so
-            // each must be a declared caveat slot (subset of `caveat`), must
-            // not be a reserved control name a client could self-assert, and
-            // must not also be `attested` — a caveat has exactly one source.
-            let holder = canonical_field_set(r.template.holder);
-            for key in &holder {
-                if crate::caveat::name::RESERVED.contains(&key.as_str()) {
-                    return Err(ConfigError::ReservedHolderKey {
-                        role: r.name.clone(),
-                        key: key.clone(),
-                    });
-                }
-                if attested.contains(key) {
-                    return Err(ConfigError::SourceConflict {
-                        role: r.name.clone(),
-                        key: key.clone(),
-                    });
-                }
-                if !caveat.contains(key) {
-                    return Err(ConfigError::HolderNotInCaveat {
-                        role: r.name.clone(),
-                        key: key.clone(),
-                    });
-                }
-            }
             let role = Role {
                 name: r.name.clone(),
                 min_ttl_seconds: r.min_ttl_seconds,
@@ -727,7 +633,6 @@ impl Config {
                 policy,
                 attested,
                 caveat,
-                holder,
                 intermediate_ttl_seconds,
             };
             if roles.insert(r.name.clone(), role).is_some() {
@@ -842,25 +747,11 @@ impl Config {
                     });
                 }
             }
-            // The attested/holder↔caveat fencing (each a subset of caveat,
-            // disjoint from each other and from the reserved control names)
-            // is enforced at config load; what seal authoring adds is the
-            // template cross-check: the policy's `{{caveat.X}}` tokens must
-            // exactly match the declared caveat manifest (which includes the
-            // attested and holder subsets). `{{attested.X}}` is no longer a
-            // namespace — a stray one is caught earlier as a malformed token.
-            //
-            // `template_surface` returns each bucket sorted+deduped, and
-            // the declared set is canonicalised the same way at load, so
-            // the contract check is a plain Vec equality of the bare keys.
-            let used_caveat = strip_ns(&surface.caveat, "caveat.");
-            if used_caveat != role.caveat {
-                return Err(ConfigError::CaveatContractMismatch {
-                    role: role.name.clone(),
-                    declared: role.caveat.clone(),
-                    used: used_caveat,
-                });
-            }
+            // The caveat manifest is derived from this same template at load
+            // (`from_raw`), so there is no declared set to cross-check — the
+            // policy's `{{caveat.X}}` tokens are the manifest by construction.
+            // `{{attested.X}}` is no longer a namespace — a stray one is caught
+            // above as a malformed token.
         }
         Ok(())
     }
@@ -1000,7 +891,6 @@ min_ttl_seconds = 60
 max_ttl_seconds = 100
 default_ttl_seconds = 100
 policy_file = "volume-rw.json"
-[role.attestation]
 intermediate_ttl_seconds = 0
 [[role]]
 name = "volume-ro"
@@ -1008,7 +898,6 @@ min_ttl_seconds = 60
 max_ttl_seconds = 100
 default_ttl_seconds = 100
 policy_file = "volume-ro.json"
-[role.attestation]
 intermediate_ttl_seconds = 600
 [[role]]
 name = "coord-base"
@@ -1018,66 +907,81 @@ default_ttl_seconds = 100
 policy_file = "coord-base.json"
 "#;
 
+    /// Policies for `ATTESTATION_SAMPLE`: the `volume-*` roles bind a
+    /// non-reserved `{{caveat.volume}}` (so they are attested); `coord-base`
+    /// binds only `sub` (so it is issuer-only).
+    fn attestation_sample_policies() -> [(&'static str, &'static str); 3] {
+        [
+            ("volume-rw.json", r#"{"r":"{{caveat.volume}}"}"#),
+            ("volume-ro.json", r#"{"r":"{{caveat.volume}}"}"#),
+            ("coord-base.json", r#"{"r":"{{caveat.sub}}"}"#),
+        ]
+    }
+
     #[test]
     fn attestation_marker_and_location_resolve_per_role() {
-        let c = parse_for_test(
-            ATTESTATION_SAMPLE,
-            &[
-                ("volume-rw.json", "{}"),
-                ("volume-ro.json", "{}"),
-                ("coord-base.json", "{}"),
-            ],
-        )
-        .expect("parse");
+        let c = parse_for_test(ATTESTATION_SAMPLE, &attestation_sample_policies()).expect("parse");
         assert_eq!(
             c.attestation_location.as_deref(),
             Some("https://coord-b.example/v1/discharge")
         );
-        // A [role.attestation] subtable marks the role attested (its TPC is
-        // keyed by the role name); a role without one is not.
+        // A role binding a non-reserved caveat is attested; one binding only
+        // reserved names (`sub`) is issuer-only.
         assert!(c.roles["volume-rw"].is_attested());
+        assert_eq!(c.roles["volume-rw"].attested, vec!["volume".to_string()]);
         assert!(c.roles["volume-ro"].is_attested());
         assert!(!c.roles["coord-base"].is_attested());
+        assert!(c.roles["coord-base"].attested.is_empty());
         // The intermediate lifetime resolves per attested role: `0` ⟹ a
         // no-`exp` intermediate the holder finalizes per-use; `n > 0` ⟹ one
-        // that expires. A role with no [role.attestation] carries none.
+        // that expires. An issuer-only role carries none.
         assert_eq!(c.roles["volume-rw"].intermediate_ttl_seconds, Some(0));
         assert_eq!(c.roles["volume-ro"].intermediate_ttl_seconds, Some(600));
         assert_eq!(c.roles["coord-base"].intermediate_ttl_seconds, None);
     }
 
     #[test]
-    fn attestation_role_without_intermediate_ttl_is_rejected_at_load() {
-        // `intermediate_ttl_seconds` is required on every attested role, so
-        // the intermediate's lifetime is always an explicit, visible
-        // choice — omitting it is a parse error, not a silent default.
+    fn attested_role_without_intermediate_ttl_is_rejected_at_load() {
+        // An attested role's intermediate lifetime must be explicit; omitting
+        // it is a load error, not a silent default.
         let toml = ATTESTATION_SAMPLE.replace("intermediate_ttl_seconds = 0\n", "");
-        assert!(parse_for_test(&toml, &[("volume-rw.json", "{}")]).is_err());
+        assert!(matches!(
+            parse_for_test(&toml, &attestation_sample_policies()),
+            Err(ConfigError::MissingIntermediateTtl { role }) if role == "volume-rw"
+        ));
     }
 
     #[test]
-    fn attestation_role_without_location_is_rejected_at_load() {
-        // A role asking for a discharge mint cannot stamp (no authority
-        // location) would mint a dead credential; load fails closed.
+    fn attested_role_without_location_is_rejected_at_load() {
+        // A role binding a non-reserved caveat needs an authority to discharge
+        // its TPC; without one it would mint a dead credential. Fail closed.
         let toml = ATTESTATION_SAMPLE.replace(
             "[attestation]\nlocation = \"https://coord-b.example/v1/discharge\"\n",
             "",
         );
         assert!(matches!(
-            parse_for_test(
-                &toml,
-                &[
-                    ("volume-rw.json", "{}"),
-                    ("volume-ro.json", "{}"),
-                    ("coord-base.json", "{}"),
-                ]
-            ),
+            parse_for_test(&toml, &attestation_sample_policies()),
             Err(ConfigError::AttestationWithoutLocation { role }) if role == "volume-rw"
         ));
     }
 
-    /// A minimal single-role config, for the seal-authoring surface checks
-    /// (the policy body is supplied per-test).
+    #[test]
+    fn issuer_only_role_with_intermediate_ttl_is_rejected() {
+        // `coord-base` is issuer-only (binds only `sub`); an intermediate
+        // lifetime is meaningless there and rejected at load.
+        let toml = ATTESTATION_SAMPLE.replace(
+            "policy_file = \"coord-base.json\"\n",
+            "policy_file = \"coord-base.json\"\nintermediate_ttl_seconds = 300\n",
+        );
+        assert!(matches!(
+            parse_for_test(&toml, &attestation_sample_policies()),
+            Err(ConfigError::UnexpectedIntermediateTtl { role }) if role == "coord-base"
+        ));
+    }
+
+    /// A minimal single-role config with no [attestation] location, for the
+    /// issuer-only and seal-authoring surface checks (the policy body is
+    /// supplied per-test).
     const SINGLE_ROLE_SAMPLE: &str = r#"
 audience = "mint"
 [store]
@@ -1088,6 +992,24 @@ min_ttl_seconds = 60
 max_ttl_seconds = 100
 default_ttl_seconds = 100
 policy_file = "r.json"
+"#;
+
+    /// A single-role config that supplies an [attestation] location and an
+    /// intermediate ttl, so a policy binding a non-reserved (attested) caveat
+    /// loads cleanly. The policy body is supplied per-test.
+    const ATTESTED_ROLE_SAMPLE: &str = r#"
+audience = "mint"
+[store]
+bucket = "state-bucket"
+[attestation]
+location = "https://a.example/v1/discharge"
+[[role]]
+name = "r"
+min_ttl_seconds = 60
+max_ttl_seconds = 100
+default_ttl_seconds = 100
+policy_file = "r.json"
+intermediate_ttl_seconds = 0
 "#;
 
     #[test]
@@ -1121,68 +1043,17 @@ policy_file = "r.json"
         ));
     }
 
-    /// A single-role config whose `[role.template]` contract lines (and
-    /// policy template body) the test supplies, for the contract-surface
-    /// checks. An empty `contract` omits the subtable entirely.
-    fn contract_toml(contract: &str) -> String {
-        let block = if contract.is_empty() {
-            String::new()
-        } else {
-            format!("[role.template]\n{contract}\n")
-        };
-        format!(
-            r#"
-audience = "mint"
-[store]
-bucket = "state-bucket"
-[[role]]
-name = "r"
-min_ttl_seconds = 60
-max_ttl_seconds = 100
-default_ttl_seconds = 100
-policy_file = "r.json"
-{block}"#
-        )
-    }
-
-    /// A single-role config with explicit `[role.template]` caveat manifest
-    /// and `[role.attestation]` attested subset (plus the top-level
-    /// attestation location an attested role needs). Bare `[]` is a valid
-    /// empty array for either list.
-    fn attested_contract_toml(caveat: &str, attested: &str) -> String {
-        format!(
-            r#"
-audience = "mint"
-[store]
-bucket = "state-bucket"
-[attestation]
-location = "https://a.example/v1/discharge"
-[[role]]
-name = "r"
-min_ttl_seconds = 60
-max_ttl_seconds = 100
-default_ttl_seconds = 100
-policy_file = "r.json"
-[role.template]
-caveat = [{caveat}]
-[role.attestation]
-attested = [{attested}]
-intermediate_ttl_seconds = 0
-"#
-        )
-    }
-
     #[test]
-    fn declared_contract_matching_template_passes_seal() {
-        // `project` is attestation-sourced, `sub` issuer-stamped; both are
-        // declared caveat slots and both render as `{{caveat.X}}`.
+    fn provenance_is_derived_from_the_template() {
+        // `project` is non-reserved (attested); `sub` is reserved (issuer).
+        // The caveat manifest is the template's tokens; the attested set is
+        // the non-reserved ones. Nothing is declared.
         let cfg = parse_for_test(
-            &attested_contract_toml(r#""project", "sub""#, r#""project""#),
+            ATTESTED_ROLE_SAMPLE,
             &[("r.json", r#"{"r":"{{caveat.project}}/{{caveat.sub}}"}"#)],
         )
         .expect("parse");
-        assert!(cfg.validate_policy_surface().is_ok());
-        // The declarations are canonicalised (sorted+deduped) at load.
+        cfg.validate_policy_surface().expect("seals");
         assert_eq!(cfg.roles["r"].attested, vec!["project".to_string()]);
         assert_eq!(
             cfg.roles["r"].caveat,
@@ -1191,120 +1062,42 @@ intermediate_ttl_seconds = 0
     }
 
     #[test]
-    fn caveat_token_typo_fails_seal_against_declaration() {
-        // The declared caveat is `project`; the template typos it as
-        // `projct`. Caught at publish, not at the first render-time 500.
+    fn issuer_only_template_needs_no_attestation() {
+        // A template binding only reserved names is issuer-only: no attested
+        // caveat, no intermediate, and it loads with no authority configured.
         let cfg = parse_for_test(
-            &attested_contract_toml(r#""project""#, r#""project""#),
-            &[("r.json", r#"{"r":"{{caveat.projct}}"}"#)],
-        )
-        .expect("load tolerates a contract mismatch");
-        assert!(matches!(
-            cfg.validate_policy_surface(),
-            Err(ConfigError::CaveatContractMismatch { declared, used, .. })
-                if declared == ["project"] && used == ["projct"]
-        ));
-    }
-
-    #[test]
-    fn attested_not_in_caveat_fails_load() {
-        // `attested` must be a subset of `caveat`: an attested name that is
-        // not a declared caveat slot is rejected at load.
-        let err = parse_for_test(
-            &attested_contract_toml(r#""sub""#, r#""project""#),
-            &[("r.json", r#"{"r":"{{caveat.sub}}"}"#)],
-        );
-        assert!(matches!(
-            err,
-            Err(ConfigError::AttestedNotInCaveat { key, .. }) if key == "project"
-        ));
-    }
-
-    #[test]
-    fn holder_subset_loads_and_seals() {
-        // A holder caveat is a declared caveat slot the template binds; it
-        // loads, canonicalises into the role, and seals cleanly.
-        let cfg = parse_for_test(
-            &contract_toml("caveat = [\"bucket\", \"sub\"]\nholder = [\"bucket\"]"),
-            &[("r.json", r#"{"r":"{{caveat.bucket}}/{{caveat.sub}}"}"#)],
+            SINGLE_ROLE_SAMPLE,
+            &[("r.json", r#"{"r":"literal-bucket/{{caveat.sub}}/*"}"#)],
         )
         .expect("parse");
         cfg.validate_policy_surface().expect("seals");
-        assert_eq!(cfg.roles["r"].holder, vec!["bucket".to_string()]);
+        assert!(!cfg.roles["r"].is_attested());
+        assert!(cfg.roles["r"].attested.is_empty());
+        assert_eq!(cfg.roles["r"].caveat, vec!["sub".to_string()]);
+        assert_eq!(cfg.roles["r"].intermediate_ttl_seconds, None);
     }
 
     #[test]
-    fn holder_not_in_caveat_fails_load() {
-        // holder must be a subset of caveat: a holder name that is not a
-        // declared caveat slot is rejected at load.
-        let err = parse_for_test(
-            &contract_toml("caveat = [\"sub\"]\nholder = [\"bucket\"]"),
-            &[("r.json", r#"{"r":"{{caveat.sub}}"}"#)],
-        );
+    fn non_reserved_caveat_without_location_is_rejected_at_load() {
+        // SINGLE_ROLE_SAMPLE configures no [attestation] location, so a
+        // template binding a non-reserved caveat is attested-but-
+        // undischargeable — rejected at load.
         assert!(matches!(
-            err,
-            Err(ConfigError::HolderNotInCaveat { key, .. }) if key == "bucket"
-        ));
-    }
-
-    #[test]
-    fn reserved_holder_name_fails_load() {
-        // A client may not self-assert a reserved control caveat: declaring
-        // a reserved name as holder-supplied is rejected at load. Every
-        // reserved name is rejected, not just `sub`.
-        for reserved in crate::caveat::name::RESERVED {
-            let err = parse_for_test(
-                &contract_toml(&format!(
-                    "caveat = [\"{reserved}\"]\nholder = [\"{reserved}\"]"
-                )),
-                &[("r.json", "{}")],
-            );
-            assert!(
-                matches!(
-                    err,
-                    Err(ConfigError::ReservedHolderKey { key, .. }) if key == *reserved
-                ),
-                "reserved holder name {reserved:?} must be rejected"
-            );
-        }
-    }
-
-    #[test]
-    fn holder_and_attested_conflict_fails_load() {
-        // A caveat has exactly one source: declaring the same name as both
-        // holder-supplied and attested is rejected at load.
-        let toml = r#"
-audience = "mint"
-[store]
-bucket = "state-bucket"
-[attestation]
-location = "https://a.example/v1/discharge"
-[[role]]
-name = "r"
-min_ttl_seconds = 60
-max_ttl_seconds = 100
-default_ttl_seconds = 100
-policy_file = "r.json"
-[role.template]
-caveat = ["region"]
-holder = ["region"]
-[role.attestation]
-attested = ["region"]
-intermediate_ttl_seconds = 0
-"#;
-        let err = parse_for_test(toml, &[("r.json", r#"{"r":"{{caveat.region}}"}"#)]);
-        assert!(matches!(
-            err,
-            Err(ConfigError::SourceConflict { key, .. }) if key == "region"
+            parse_for_test(
+                SINGLE_ROLE_SAMPLE,
+                &[("r.json", r#"{"r":"{{caveat.project}}"}"#)],
+            ),
+            Err(ConfigError::AttestationWithoutLocation { role }) if role == "r"
         ));
     }
 
     #[test]
     fn stale_attested_token_fails_seal_as_malformed() {
         // `{{attested.X}}` is no longer a namespace; a leftover one is a
-        // malformed (unknown-namespace) token, rejected at publish.
+        // malformed (unknown-namespace) token, rejected at publish. It is not
+        // a caveat token, so the role stays issuer-only and loads.
         let cfg = parse_for_test(
-            &contract_toml(""),
+            SINGLE_ROLE_SAMPLE,
             &[("r.json", r#"{"r":"{{attested.volume}}"}"#)],
         )
         .expect("load tolerates a malformed template");
@@ -1315,63 +1108,11 @@ intermediate_ttl_seconds = 0
     }
 
     #[test]
-    fn reserved_attested_name_fails_load() {
-        // The fencing invariant: a declared attested name that collides
-        // with a reserved control-caveat name is rejected at load, so an
-        // attestation can never bake over a MAC-bound control caveat. Every
-        // reserved name is rejected, not just `sub`.
-        for reserved in crate::caveat::name::RESERVED {
-            let err = parse_for_test(
-                &attested_contract_toml("", &format!(r#""{reserved}""#)),
-                &[("r.json", "{}")],
-            );
-            assert!(
-                matches!(
-                    err,
-                    Err(ConfigError::ReservedAttestedKey { key, .. }) if key == *reserved
-                ),
-                "reserved name {reserved:?} must be rejected"
-            );
-        }
-    }
-
-    #[test]
-    fn declared_attested_names_are_the_registry() {
-        // The declared set is itself the authority: a non-reserved name
-        // unknown to any global registry seals fine when it is a declared
-        // caveat slot and the template agrees.
-        let cfg = parse_for_test(
-            &attested_contract_toml(r#""region""#, r#""region""#),
-            &[("r.json", r#"{"r":"{{caveat.region}}"}"#)],
-        )
-        .expect("cfg");
-        cfg.validate_policy_surface()
-            .expect("a declared, non-reserved attested name is valid");
-    }
-
-    #[test]
-    fn dropped_caveat_binding_fails_seal() {
-        // The security-relevant omission: a role declares it must scope by
-        // the MAC-verified `sub`, but the template forgets `{{caveat.sub}}`.
-        // The seal refuses to pin a template that drops the binding.
-        let cfg = parse_for_test(
-            &contract_toml(r#"caveat = ["sub"]"#),
-            &[("r.json", r#"{"r":"literal-bucket/*"}"#)],
-        )
-        .expect("load tolerates a contract mismatch");
-        assert!(matches!(
-            cfg.validate_policy_surface(),
-            Err(ConfigError::CaveatContractMismatch { declared, used, .. })
-                if declared == ["sub"] && used.is_empty()
-        ));
-    }
-
-    #[test]
     fn unknown_mint_key_fails_seal() {
         // `mint.*` is closed to the server-computed set; an unknown key
         // fails at publish rather than at render.
         let cfg = parse_for_test(
-            &contract_toml(""),
+            SINGLE_ROLE_SAMPLE,
             &[("r.json", r#"{"r":"{{mint.bogus}}"}"#)],
         )
         .expect("load tolerates an unknown mint key");

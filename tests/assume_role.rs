@@ -47,10 +47,6 @@ min_ttl_seconds = 60
 max_ttl_seconds = 2592000
 default_ttl_seconds = 2592000
 policy_file = "volume-ro.json"
-[role.template]
-caveat = ["volume"]
-[role.attestation]
-attested = ["volume"]
 intermediate_ttl_seconds = 0
 "#;
 
