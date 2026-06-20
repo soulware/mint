@@ -469,9 +469,7 @@ async fn finalize_attested(
 
 /// A parsed `NAME=VALUE` CLI argument — a narrowing caveat (`assume-role`),
 /// a holder-supplied value (`exchange --caveat`), or a value for the
-/// attestation authority (`exchange --attest`). Named rather than a bare
-/// `(String, String)` so name and value cannot be transposed at the sites
-/// that consume them.
+/// attestation authority (`exchange --attest`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CaveatArg {
     name: String,

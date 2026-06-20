@@ -55,10 +55,7 @@ pub enum EnrollError {
 
 /// A source-stamped caveat baked into a credential at exchange — a
 /// holder-supplied value (fixed at `enroll-exchange`) or a discharged
-/// attested value (resolved at `exchange-finalize`). Named rather than a
-/// bare `(String, String)` so name and value cannot be transposed at a call
-/// site and a signature carrying it reads as "the values to bake," not an
-/// anonymous pair.
+/// attested value (resolved at `exchange-finalize`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BakedCaveat {
     pub name: String,
@@ -66,9 +63,6 @@ pub struct BakedCaveat {
 }
 
 impl BakedCaveat {
-    /// Construct from any string-like name/value — the two arguments are
-    /// distinct fields, so a transposed call is a type-checked mistake at
-    /// the few sites that build these, not a silent wrong-order bug.
     pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             name: name.into(),
