@@ -76,7 +76,9 @@ bucket = "mint-demo"
 #   - attested       — any other name: the caller proposes it at exchange
 #                      (`--caveat X=V`) and the attestation authority vouches
 #                      it before it bakes in.
-# The two roles below cover both.
+# The two roles below cover both. Each role's `ttl_seconds` is the credential
+# lifetime in seconds, clamped to the `exp` the caller attenuated onto its
+# credential — a caller can ask for less, never more.
 
 # `demo` — issuer-only. Its template binds only the reserved, issuer-stamped
 # `sub`, so it needs no attestation authority and exchanges in one step. The
@@ -85,18 +87,15 @@ bucket = "mint-demo"
 #   mint client exchange demo
 [[role]]
 name = "demo"
-# Credential lifetime in seconds, clamped to the `exp` the caller attenuated
-# onto its credential — a caller can ask for less, never more.
 ttl_seconds = 900
 
 # `demo-attested` — attested. Its template binds the non-reserved `bucket`
 # and `project`; the caller proposes both at exchange and the attestation
 # authority vouches them before they bake into the credential. Any
-# non-reserved caveat makes a role attested.
-#   mint client exchange --caveat bucket=acme-data --caveat project=apollo demo-attested
+# non-reserved caveat makes a role attested, and an attested role exchanges
+# via a durable (no-`exp`) intermediate the holder finalizes per-use — e.g. a
+# coordinator minting a credential per volume.
+#   mint client exchange demo-attested --caveat bucket=demo-bucket --caveat project=apollo
 [[role]]
 name = "demo-attested"
 ttl_seconds = 300
-# Attested roles exchange via a durable (no-`exp`) intermediate that the
-# holder finalizes per-use — e.g. a coordinator minting a credential per
-# volume.
