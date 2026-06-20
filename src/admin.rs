@@ -46,6 +46,15 @@ fn unauthorized_response() -> Response {
         .into_response()
 }
 
+/// Opaque-401 for an admin auth failure, with an operator-facing trace
+/// naming which verb was refused. The wire response stays detail-free
+/// (every admin auth failure is the same `401`); the log is where an
+/// operator watching `mint serve` sees the refusal.
+fn admin_denied(op: &str) -> Response {
+    tracing::info!(target: "mint::admin", op, "admin: denied");
+    unauthorized_response()
+}
+
 /// Admin routes. Every route is a `POST` gated by [`verify_discharge`]
 /// — the admin-service bundle + a discharge attenuated to that route's
 /// `op=admin:<verb>`. POST (not GET) even for reads, because the
@@ -85,9 +94,13 @@ pub struct InviteResponse {
 
 /// Read the current invite. Body is just the PoP freshness `{ts}`.
 async fn handle_invite(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
-    if let Err(r) = verify_discharge(&state, &headers, &body, ADMIN_INVITE_READ).await {
-        return r;
-    }
+    let operator = match verify_discharge(&state, &headers, &body, ADMIN_INVITE_READ).await {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    // A read; `debug` so the steady-state info log is reserved for the
+    // mutating verbs (rotate/approve/revoke).
+    tracing::debug!(target: "mint::admin", op = ADMIN_INVITE_READ, operator = %operator, "admin: invite read");
     match build_invite(&state).await {
         Ok(r) => json_ok(r),
         Err(s) => s,
@@ -110,11 +123,11 @@ async fn verify_discharge(
     expected_op: &str,
 ) -> Result<String, Response> {
     let Some(bundle) = crate::http::extract_bundle(headers) else {
-        return Err(unauthorized_response());
+        return Err(admin_denied(expected_op));
     };
     let proof = match crate::http::pop_proof(headers) {
         Ok(p) => p,
-        Err(()) => return Err(unauthorized_response()),
+        Err(()) => return Err(admin_denied(expected_op)),
     };
     let keyring = state.store.keyring().await;
     let now_unix = chrono::Utc::now().timestamp().max(0) as u64;
@@ -127,7 +140,7 @@ async fn verify_discharge(
         &state.config.audience,
         expected_op,
     )
-    .map_err(|_| unauthorized_response())?;
+    .map_err(|_| admin_denied(expected_op))?;
     // The admin plane clears the discharge's `Scope` against
     // `mint:admin` (`docs/design-auth-service.md` § *Scope tier*): a
     // session that obtained only an enroll- or exchange-scope discharge
@@ -137,7 +150,7 @@ async fn verify_discharge(
         EffectiveCaveats::new(&cleared.discharge_caveats).resolve(name::SCOPE),
         Resolved::Value(v) if v == scope::MINT_ADMIN
     ) {
-        return Err(unauthorized_response());
+        return Err(admin_denied(expected_op));
     }
     // The operator's `sub` from the discharge — the audit-bearing identity
     // each admin verb records (e.g. `approved_by` on approve). Read from
@@ -145,7 +158,7 @@ async fn verify_discharge(
     // own `sub` (the machine identity).
     match EffectiveCaveats::new(&cleared.discharge_caveats).resolve(name::SUB) {
         Resolved::Value(s) => Ok(s),
-        _ => Err(unauthorized_response()),
+        _ => Err(admin_denied(expected_op)),
     }
 }
 
@@ -154,12 +167,14 @@ async fn handle_rotate_invite(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(r) = verify_discharge(&state, &headers, &body, ADMIN_INVITE_ROTATE).await {
-        return r;
-    }
+    let operator = match verify_discharge(&state, &headers, &body, ADMIN_INVITE_ROTATE).await {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
     if let Err(e) = state.store.rotate_invite().await {
         return service_unavailable(&format!("rotate invite: {e}"));
     }
+    tracing::info!(target: "mint::admin", op = ADMIN_INVITE_ROTATE, operator = %operator, "admin: invite rotated");
     match build_invite(&state).await {
         Ok(r) => json_ok(r),
         Err(s) => s,
@@ -233,16 +248,20 @@ async fn handle_list_enrollments(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(r) = verify_discharge(&state, &headers, &body, ADMIN_ENROLL_LIST).await {
-        return r;
-    }
+    let operator = match verify_discharge(&state, &headers, &body, ADMIN_ENROLL_LIST).await {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
     let now = Utc::now().timestamp().max(0) as u64;
     match state.store.list(now).await {
-        Ok(rows) => json_ok(
-            rows.into_iter()
-                .map(EnrollmentRow::from)
-                .collect::<Vec<_>>(),
-        ),
+        Ok(rows) => {
+            tracing::debug!(target: "mint::admin", op = ADMIN_ENROLL_LIST, operator = %operator, rows = rows.len(), "admin: enroll list");
+            json_ok(
+                rows.into_iter()
+                    .map(EnrollmentRow::from)
+                    .collect::<Vec<_>>(),
+            )
+        }
         Err(e) => service_unavailable(&format!("list: {e}")),
     }
 }
@@ -277,7 +296,10 @@ async fn handle_approve(
         .approve(&req.sub, &req.pubkey, &approved_by, &approved_at)
         .await
     {
-        Ok(()) => json_ok(ApproveResponse { approved_at }),
+        Ok(()) => {
+            tracing::info!(target: "mint::admin", op = ADMIN_ENROLL_APPROVE, operator = %approved_by, sub = %req.sub, "admin: enrollment approved");
+            json_ok(ApproveResponse { approved_at })
+        }
         Err(e) => service_unavailable(&format!("approve: {e}")),
     }
 }
@@ -314,12 +336,23 @@ async fn handle_revoke(State(state): State<AppState>, headers: HeaderMap, body: 
     };
     let revoked_at = Utc::now().to_rfc3339();
     match state.store.revoke(&req.sub, &revoked_by, &revoked_at).await {
-        Ok(outcome) => json_ok(RevokeResponse {
-            revoked_at,
-            rev_epoch: outcome.rev_epoch,
-            was_enrolled: outcome.was_enrolled,
-            removed_pending: outcome.removed_pending,
-        }),
+        Ok(outcome) => {
+            tracing::info!(
+                target: "mint::admin",
+                op = ADMIN_ENROLL_REVOKE,
+                operator = %revoked_by,
+                sub = %req.sub,
+                was_enrolled = outcome.was_enrolled,
+                rev_epoch = outcome.rev_epoch,
+                "admin: enrollment revoked",
+            );
+            json_ok(RevokeResponse {
+                revoked_at,
+                rev_epoch: outcome.rev_epoch,
+                was_enrolled: outcome.was_enrolled,
+                removed_pending: outcome.removed_pending,
+            })
+        }
         Err(e) => service_unavailable(&format!("revoke: {e}")),
     }
 }
@@ -349,11 +382,11 @@ async fn handle_seal(State(state): State<AppState>, headers: HeaderMap, body: By
     // can name the operator subject — carried in the discharge — in the
     // seal log.
     let Some(bundle) = crate::http::extract_bundle(&headers) else {
-        return unauthorized_response();
+        return admin_denied(ADMIN_SEAL);
     };
     let proof = match crate::http::pop_proof(&headers) {
         Ok(p) => p,
-        Err(()) => return unauthorized_response(),
+        Err(()) => return admin_denied(ADMIN_SEAL),
     };
     let keyring = state.store.keyring().await;
     let now_unix = Utc::now().timestamp().max(0) as u64;
@@ -367,7 +400,7 @@ async fn handle_seal(State(state): State<AppState>, headers: HeaderMap, body: By
         ADMIN_SEAL,
     ) {
         Ok(c) => c,
-        Err(_) => return unauthorized_response(),
+        Err(_) => return admin_denied(ADMIN_SEAL),
     };
     let operator = match EffectiveCaveats::new(&cleared.discharge_caveats).resolve(name::SUB) {
         Resolved::Value(s) => s.to_string(),

@@ -149,6 +149,11 @@ async fn issue_discharge(
     let discharge =
         mint_under_key_with_nonce(&pt.r, KeyRef::Discharge, tpc::ticket_id(&cid), caveats);
 
+    tracing::info!(
+        role = %pt.role,
+        attested = req.caveats.len(),
+        "attest: issued discharge",
+    );
     (
         StatusCode::OK,
         axum::Json(json!({"discharge": discharge.encode()})),

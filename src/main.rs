@@ -431,7 +431,12 @@ async fn serve(
     config: &Path,
     bind_override: Option<SocketAddr>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Human-readable trace goes to stderr; stdout is reserved for the
+    // structured audit log (`AuditLog` writes JSON lines there), so
+    // `mint serve >audit.jsonl 2>trace.log` keeps the two streams apart.
+    // `RUST_LOG=mint::serve=debug` surfaces per-request narration.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )

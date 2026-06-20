@@ -162,6 +162,23 @@ fn peer_ip(headers: &HeaderMap) -> String {
         .to_string()
 }
 
+/// Operator-facing narration of a request arriving on the mint surface.
+/// `debug` so the steady-state log is one line per request (the outcome);
+/// `RUST_LOG=mint::serve=debug` adds the arrival. The structured audit log
+/// (stdout) is the machine record; these `mint::serve` lines (stderr) are
+/// what an operator watching `mint serve` reads.
+fn trace_received(op: &str, request_id: &str, caller: &str) {
+    tracing::debug!(target: "mint::serve", op, request_id, caller, "request received");
+}
+
+/// Operator-facing narration of a request's outcome, mirroring the audit
+/// line's outcome tag (`granted`, `denied:<reason>`, `awaiting_approval`, …).
+/// `info` so each client interaction shows up by default. `role` is empty
+/// where the operation has none (enroll) or has not resolved one yet.
+fn trace_outcome(op: &str, request_id: &str, caller: &str, role: &str, outcome: &str) {
+    tracing::info!(target: "mint::serve", op, request_id, caller, role, outcome, "request handled");
+}
+
 /// A scalar caveat must be present and equal to `expected` — the
 /// positive-value gate (`op`/`aud`). Absent, contradictory, or any
 /// other value all fail closed; no path tests for absence.
@@ -400,7 +417,19 @@ pub fn verify_and_clear(
 async fn assume_role(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     let request_id = uuid::Uuid::new_v4().to_string();
     let caller = peer_ip(&headers);
-    let audit = |entry: AuditEntry| state.audit.record(&entry);
+    trace_received(op::ASSUME_ROLE, &request_id, &caller);
+    // Records the outcome to both sinks: the structured audit JSON and the
+    // operator's `mint::serve` trace.
+    let audit = |entry: AuditEntry| {
+        trace_outcome(
+            op::ASSUME_ROLE,
+            &entry.request_id,
+            &entry.caller_address,
+            &entry.role,
+            &entry.outcome,
+        );
+        state.audit.record(&entry);
+    };
     let now = Utc::now();
     let now_unix = now.timestamp().max(0) as u64;
     let base_entry = |outcome: &str| AuditEntry {
@@ -703,8 +732,10 @@ async fn assume_role(State(state): State<AppState>, headers: HeaderMap, body: By
 async fn enroll(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     let request_id = uuid::Uuid::new_v4().to_string();
     let caller = peer_ip(&headers);
+    trace_received(op::ENROLL, &request_id, &caller);
     let now_unix = Utc::now().timestamp().max(0) as u64;
     let audit = |outcome: &str, caveats: &[Caveat]| {
+        trace_outcome(op::ENROLL, &request_id, &caller, "", outcome);
         state.audit.record(&AuditEntry {
             timestamp: Utc::now().to_rfc3339(),
             request_id: request_id.clone(),
@@ -937,11 +968,13 @@ async fn enroll_exchange(
 ) -> Response {
     let request_id = uuid::Uuid::new_v4().to_string();
     let caller = peer_ip(&headers);
+    trace_received(op::ENROLL_EXCHANGE, &request_id, &caller);
     let now_unix = Utc::now().timestamp().max(0) as u64;
     // `role` is stamped once the request resolves it (the role-less early
     // denials pass ""); no Tigris key is minted here, so the key field is
     // always absent on these lines.
     let audit = |outcome: &str, caveats: &[Caveat], role: &str| {
+        trace_outcome(op::ENROLL_EXCHANGE, &request_id, &caller, role, outcome);
         state.audit.record(&AuditEntry {
             timestamp: Utc::now().to_rfc3339(),
             request_id: request_id.clone(),
@@ -1187,11 +1220,13 @@ async fn exchange_finalize(
 ) -> Response {
     let request_id = uuid::Uuid::new_v4().to_string();
     let caller = peer_ip(&headers);
+    trace_received(op::EXCHANGE_FINALIZE, &request_id, &caller);
     let now_unix = Utc::now().timestamp().max(0) as u64;
     // `role` is baked into the step-1 intermediate, so it's known for
     // every line after it's resolved from the cleared caveats (the
     // role-less early denials pass ""); no Tigris key is minted here.
     let audit = |outcome: &str, caveats: &[Caveat], role: &str| {
+        trace_outcome(op::EXCHANGE_FINALIZE, &request_id, &caller, role, outcome);
         state.audit.record(&AuditEntry {
             timestamp: Utc::now().to_rfc3339(),
             request_id: request_id.clone(),
