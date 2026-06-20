@@ -1,8 +1,8 @@
 # Design: always-attest — retiring `holder`, collapsing to two provenances
 
-Status: **proposed** (not yet implemented). Revises the three-provenance
-model in `design-caveat-provenance.md` (landed): `holder` is removed as a
-distinct source.
+Status: **landed**. Revises the three-provenance model in
+`design-caveat-provenance.md` (also landed): `holder` is removed as a distinct
+source.
 
 This note collapses the caveat-provenance model from three sources to two.
 Today a `{{caveat.X}}` value is `issuer`-stamped, `holder`-supplied, or
@@ -205,10 +205,18 @@ the same time." That is **not** the design. Two facts rule it out:
    `attest.sock` leaves `enroll-exchange` / `exchange-finalize` byte-identical
    between demo and production.
 
-Fly's "do-nothing" line is a casual one ("just for funsies") and does not
-anticipate late-bound attested values proposed per-finalize. The load-bearing
-idea we keep from it is only that *the verifier cannot distinguish a co-located
-authority from a remote one* — which holds here: the demo authority is a
+Fly's "do-nothing" line describes a *holder* attenuating its own macaroon —
+inventing a throwaway URL / `KA` / `r`, appending the TPC, and minting the
+matching discharge in the same breath, so the party adding the caveat and the
+party discharging it are one. Our attested TPC is the inverse: mint (the
+*issuer*) adds it and a *separate* authority discharges it, and attestation's
+whole value is that those two parties differ — the authority vouches a value the
+issuer did not choose. Collapsing them into a do-nothing erases the gate, so the
+analogy never carried. (Nowhere in mint is a TPC holder-added: the invite,
+ticket, admin-token, and attested intermediate are all issuer-added and
+authority-discharged.) The load-bearing idea we keep from it is only that *the
+verifier cannot distinguish a co-located authority from a remote one* — which
+holds here: the demo authority is a
 faithful scaled-down coord-B (same TPC, same `CID`-under-`K_M-B`, same discharge
 round-trip over a socket), differing only in that the party answering
 `attest.sock` is in mint's process rather than on a separate host. Production's
