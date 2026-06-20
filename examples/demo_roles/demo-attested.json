@@ -4,9 +4,7 @@
     "Sid": "DemoAttested",
     "Effect": "Allow",
     "Action": ["s3:GetObject"],
-    "Resource": [
-      "arn:aws:s3:::{{caveat.bucket}}/{{caveat.project}}/*"
-    ],
+    "Resource": ["arn:aws:s3:::{{caveat.bucket}}/{{caveat.project}}/*"],
     "Condition": {
       "DateLessThan": {"aws:CurrentTime": "{{mint.expiry}}"}
     }
