@@ -166,10 +166,6 @@ enum ClientCmd {
         /// Defaults to `credentials/<role>`.
         #[arg(long = "in")]
         in_file: Option<String>,
-        /// Narrowing caveat to attenuate the credential with (repeatable).
-        /// Vocabulary-agnostic — e.g. `--caveat exp=1750000000`.
-        #[arg(long = "caveat", value_name = "NAME=VALUE")]
-        caveat: Vec<String>,
         #[arg(long, default_value_t = 900)]
         ttl: u64,
         /// Role name from the mint config.
@@ -325,14 +321,12 @@ async fn client_cmd(
         ClientCmd::AssumeRole {
             socket,
             in_file,
-            caveat,
             ttl,
             role,
         } => {
             let transport = client_transport(socket)?;
             let in_file = in_file.unwrap_or_else(|| mint::client::credential_path(&role));
-            let kp =
-                mint::client::assume_role(&dir, &transport, &role, &caveat, ttl, &in_file).await?;
+            let kp = mint::client::assume_role(&dir, &transport, &role, ttl, &in_file).await?;
             println!("{kp}");
             Ok(())
         }
