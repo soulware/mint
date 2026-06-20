@@ -254,6 +254,7 @@ async fn issue_session(State(state): State<AppState>, body: Bytes) -> Response {
     }
     let now_unix = Utc::now().timestamp().max(0) as u64;
     let session = mint_session(&k_session, &req.subject, now_unix);
+    tracing::info!(sub = %req.subject, "auth: operator login");
     (
         StatusCode::OK,
         axum::Json(json!({"session": session.encode()})),
@@ -332,6 +333,7 @@ async fn issue_discharge(
         ],
     );
 
+    tracing::info!(sub = %claims.subject, scope = %req.scope, "auth: issued discharge");
     (
         StatusCode::OK,
         axum::Json(json!({"discharge": discharge.encode()})),
