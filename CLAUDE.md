@@ -82,7 +82,9 @@ A one-time pass that bakes deployment constants into role templates: it substitu
 `*.json` under `--in-dir` and writes the result to `--out-dir`. `{{caveat.X}}` / `{{mint.X}}` are
 left for the request-time pass; a `{{build.X}}` with no `--build` value fails the build (and nothing
 is written). Reads no config and no keyring. This is how an embedding project (e.g. elide) ships
-role templates with the bucket name etc. left as `{{build.bucket}}` and binds them at deploy.
+role templates with the bucket name etc. left as `{{build.bucket}}` and binds them at deploy. See
+`examples/role_templates/` for renderable source templates (the sibling `examples/demo_roles/` is
+what they look like once rendered).
 
 Client side (the client's half; identity under `./mint_client`):
 ```sh

@@ -121,3 +121,43 @@ fn unused_build_var_warns_but_succeeds() {
     assert!(stderr.contains("warning"), "{stderr}");
     assert!(stderr.contains("bukcet"), "names the unused key: {stderr}");
 }
+
+/// The shipped `examples/role_templates/` source must render to a clean,
+/// seal-authorable roles dir — so the documented example stays correct.
+#[test]
+fn shipped_example_templates_render_clean() {
+    let in_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("role_templates");
+    let d = tempfile::tempdir().unwrap();
+    let out = d.path().join("mint_roles");
+
+    let res = run(&[
+        "render",
+        "--in-dir",
+        in_dir.to_str().unwrap(),
+        "--build",
+        "bucket=example-bucket",
+        "--out-dir",
+        out.to_str().unwrap(),
+    ]);
+    assert!(res.status.success(), "example render failed: {res:?}");
+
+    for name in ["demo.json", "demo-attested.json"] {
+        let body = std::fs::read_to_string(out.join(name)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        // The build constant is bound and nothing build-namespaced survives.
+        assert!(body.contains("example-bucket"), "{name}: {body}");
+        assert!(
+            !body.contains("{{build."),
+            "{name} leaked a build token: {body}"
+        );
+        // The output passes the seal-authoring lint: no malformed tokens (a
+        // stray build token would read as an unknown namespace).
+        let malformed = mint::template::malformed_tokens(&doc);
+        assert!(
+            malformed.is_empty(),
+            "{name} has malformed tokens: {malformed:?}"
+        );
+    }
+}

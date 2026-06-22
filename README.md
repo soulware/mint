@@ -141,10 +141,10 @@ The template for the `demo-attested` role substitutes two *attested* `{{caveat.X
 
 ## Build-time templating (`mint render`)
 
-A role template can leave deployment constants — the bucket name, a region — as `{{build.X}}` tokens, to be bound once at build/deploy rather than hand-edited per environment. `mint render` is that one-time pass:
+A role template can leave deployment constants — the bucket name, a region — as `{{build.X}}` tokens, to be bound once at build/deploy rather than hand-edited per environment. `mint render` is that one-time pass. The [`examples/role_templates/`](examples/role_templates) directory holds source templates you can render directly:
 
 ```bash
-mint render --in-dir ./role-templates --build bucket=my-prod-bucket --out-dir ./mint_roles
+mint render --in-dir examples/role_templates --build bucket=my-prod-bucket --out-dir ./mint_roles
 ```
 
 It substitutes `{{build.X}}` tokens (from the explicit, repeatable `--build key=value` inputs) in the JSON string leaves of every `*.json` under `--in-dir`, writing the result to `--out-dir` — the `roles_dir` that `mint serve` / `mint seal` then consume. The request-time `{{caveat.X}}` / `{{mint.X}}` tokens are passed through untouched. A `{{build.X}}` with no matching `--build` value fails the build and nothing is written, so a half-bound template can never be sealed.
