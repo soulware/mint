@@ -28,6 +28,7 @@ pub mod macaroon;
 pub mod mint_rw;
 pub mod operator;
 pub mod pop;
+pub mod render;
 pub mod role;
 pub mod seal;
 pub mod sealed_cache;

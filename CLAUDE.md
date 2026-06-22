@@ -73,6 +73,19 @@ mint enroll list / approve <sub> / revoke <sub>
 mint role list / inspect <name>
 ```
 
+Build/deploy side (before `serve`/`seal`):
+```sh
+mint render --in-dir <src> --build bucket=<v> [--build k=v …] --out-dir <dst>
+```
+A one-time pass that bakes deployment constants into role templates: it substitutes
+`{{build.X}}` tokens (from explicit `--build key=value` inputs) in the JSON string leaves of every
+`*.json` under `--in-dir` and writes the result to `--out-dir`. `{{caveat.X}}` / `{{mint.X}}` are
+left for the request-time pass; a `{{build.X}}` with no `--build` value fails the build (and nothing
+is written). Reads no config and no keyring. This is how an embedding project (e.g. elide) ships
+role templates with the bucket name etc. left as `{{build.bucket}}` and binds them at deploy. See
+`examples/role_templates/` for renderable source templates (the sibling `examples/demo_roles/` is
+what they look like once rendered).
+
 Client side (the client's half; identity under `./mint_client`):
 ```sh
 mint client fingerprint                         # mints identity on first use; operator compares this during approve
@@ -175,8 +188,14 @@ the value from `(sub, role)` (the attested caveat's CID seals the role name for 
   held in an `ArcSwap` so `mint seal` swaps the served surface live, no restart.
 - `role` / `template` / `audit` — role gate, handlebars policy render, JSON audit lines. A policy
   template substitutes values from two namespaces: `{{caveat.X}}` (MAC-verified — issuer-stamped or
-  attestation-baked) and `{{mint.X}}` (mint-computed). A deployment constant is an inlined literal,
-  not a token.
+  attestation-baked) and `{{mint.X}}` (mint-computed). A deployment constant reaches the served
+  template either as an inlined literal or as a `{{build.X}}` token baked at build time by `render`.
+- `render` — the build-time pass behind `mint render`. Substitutes `{{build.X}}` deployment
+  constants into role templates' JSON string leaves (same injection-proof round-trip as `template`),
+  leaving `{{caveat.X}}` / `{{mint.X}}` for the request path. `build` is build-time-only: a
+  surviving `{{build.X}}` is an unknown namespace to `template`, so seal authoring rejects it and
+  serve fails closed. Owns the whole `build` namespace — an unresolved/malformed `build` token fails
+  the run and nothing is written.
 - `config` — TOML (audience, `data_dir`, `roles_dir`, tenant, per-role metadata). Each role's
   policy template is a separate file under `roles_dir` (`<name>.json`, or `policy_file`). The
   macaroon root key is **not** config. Admin credential from `AWS_*`, never TOML.
