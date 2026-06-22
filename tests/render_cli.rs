@@ -45,11 +45,11 @@ fn bakes_build_constant_and_keeps_request_tokens() {
 
     let res = run(&[
         "render",
-        "--roles",
+        "--in-dir",
         src.to_str().unwrap(),
         "--build",
         "bucket=elide-prod",
-        "--out",
+        "--out-dir",
         out.to_str().unwrap(),
     ]);
     assert!(res.status.success(), "render failed: {res:?}");
@@ -80,11 +80,11 @@ fn missing_build_value_fails_and_writes_nothing() {
 
     let res = run(&[
         "render",
-        "--roles",
+        "--in-dir",
         src.to_str().unwrap(),
         "--build",
         "bucket=elide-prod",
-        "--out",
+        "--out-dir",
         out.to_str().unwrap(),
     ]);
     assert!(!res.status.success(), "must fail on an unresolved token");
@@ -107,13 +107,13 @@ fn unused_build_var_warns_but_succeeds() {
 
     let res = run(&[
         "render",
-        "--roles",
+        "--in-dir",
         src.to_str().unwrap(),
         "--build",
         "bucket=elide-prod",
         "--build",
         "bukcet=typo", // not referenced by any template
-        "--out",
+        "--out-dir",
         out.to_str().unwrap(),
     ]);
     assert!(res.status.success(), "render failed: {res:?}");

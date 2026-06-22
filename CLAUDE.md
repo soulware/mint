@@ -75,13 +75,13 @@ mint role list / inspect <name>
 
 Build/deploy side (before `serve`/`seal`):
 ```sh
-mint render --roles <src> --build bucket=<v> [--build k=v …] --out <dst>
+mint render --in-dir <src> --build bucket=<v> [--build k=v …] --out-dir <dst>
 ```
 A one-time pass that bakes deployment constants into role templates: it substitutes
 `{{build.X}}` tokens (from explicit `--build key=value` inputs) in the JSON string leaves of every
-`*.json` under `--roles` and writes the result to `--out`. `{{caveat.X}}` / `{{mint.X}}` are left
-for the request-time pass; a `{{build.X}}` with no `--build` value fails the build (and nothing is
-written). Reads no config and no keyring. This is how an embedding project (e.g. elide) ships
+`*.json` under `--in-dir` and writes the result to `--out-dir`. `{{caveat.X}}` / `{{mint.X}}` are
+left for the request-time pass; a `{{build.X}}` with no `--build` value fails the build (and nothing
+is written). Reads no config and no keyring. This is how an embedding project (e.g. elide) ships
 role templates with the bucket name etc. left as `{{build.bucket}}` and binds them at deploy.
 
 Client side (the client's half; identity under `./mint_client`):
