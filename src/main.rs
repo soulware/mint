@@ -82,6 +82,24 @@ enum Command {
         #[arg(long, env = "MINT_CONFIG", default_value = "mint.toml")]
         config: PathBuf,
     },
+    /// Build step: bake deployment constants into role templates.
+    ///
+    /// Substitutes `{{build.X}}` tokens (from `--build key=value`) in the
+    /// string leaves of every `*.json` template under `--roles`, writing the
+    /// results to `--out`. `{{caveat.X}}` / `{{mint.X}}` tokens are left for
+    /// the request-time pass; a `{{build.X}}` with no value fails the build.
+    Render {
+        /// Source directory of role-policy templates (the `*.json` files).
+        #[arg(long)]
+        roles: PathBuf,
+        /// A deployment constant as `key=value`, repeatable — e.g.
+        /// `--build bucket=my-bucket`. Resolves `{{build.key}}` tokens.
+        #[arg(long = "build", value_name = "KEY=VALUE", required = true)]
+        build: Vec<String>,
+        /// Output directory for the rendered templates (created if absent).
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Reference client — the caller's half of the flow.
     Client {
         /// Identity + received-macaroon directory (default `./mint_client`).
@@ -259,6 +277,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             EnrollCmd::Revoke { config, sub, yes } => enroll_revoke(&config, &sub, yes).await,
         },
         Command::Seal { config } => seal(&config).await,
+        Command::Render { roles, build, out } => render(&roles, &build, &out),
         Command::Role { cmd } => match cmd {
             RoleCmd::List { config } => role_list(&config),
             RoleCmd::Inspect { config, name } => role_inspect(&config, &name),
@@ -738,6 +757,26 @@ async fn seal(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             .map(|(name, hash)| format!("{name}:{}", &hash[..12.min(hash.len())]))
             .collect::<Vec<_>>()
             .join(", "),
+    );
+    Ok(())
+}
+
+/// `mint render` — the build-time pass that bakes `{{build.X}}` deployment
+/// constants into role templates (`mint::render`). It reads no config and
+/// touches no keyring: a pure file transform from a source roles dir to an
+/// output one, run as part of build/deploy before `mint serve`/`mint seal`.
+fn render(roles: &Path, build: &[String], out: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let vars = mint::render::parse_build_vars(build)?;
+    let report = mint::render::render_dir(roles, out, &vars)?;
+    for key in &report.unused_vars {
+        eprintln!("warning: --build {key} was not referenced by any template");
+    }
+    eprintln!(
+        "rendered {} template(s) from {} to {}: {}",
+        report.rendered.len(),
+        roles.display(),
+        out.display(),
+        report.rendered.join(", "),
     );
     Ok(())
 }

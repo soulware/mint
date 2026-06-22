@@ -139,6 +139,18 @@ The template for the `demo-attested` role substitutes two *attested* `{{caveat.X
 ./target/debug/mint client assume-role demo-attested
 ```
 
+## Build-time templating (`mint render`)
+
+A role template can leave deployment constants — the bucket name, a region — as `{{build.X}}` tokens, to be bound once at build/deploy rather than hand-edited per environment. `mint render` is that one-time pass:
+
+```bash
+mint render --roles ./role-templates --build bucket=my-prod-bucket --out ./mint_roles
+```
+
+It substitutes `{{build.X}}` tokens (from the explicit, repeatable `--build key=value` inputs) in the JSON string leaves of every `*.json` under `--roles`, writing the result to `--out` — the `roles_dir` that `mint serve` / `mint seal` then consume. The request-time `{{caveat.X}}` / `{{mint.X}}` tokens are passed through untouched. A `{{build.X}}` with no matching `--build` value fails the build and nothing is written, so a half-bound template can never be sealed.
+
+This is how an embedding project (e.g. [elide](https://github.com/soulware/elide)) ships role templates with the static values left as `{{build.bucket}}` and binds them as a step in its build pipeline.
+
 ## License
 
 Licensed under either of
