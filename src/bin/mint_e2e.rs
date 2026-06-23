@@ -44,7 +44,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let demo_enabled = config.demo_auth.is_some();
     let mut store = Store::open_local(&config.data_dir).await?;
     if demo_enabled || config.auth_location.is_some() {
-        store.init_k_m_a(&config.data_dir, demo_enabled)?;
+        let configured = config.demo_auth.as_ref().and_then(|d| d.k_m_a);
+        store.init_k_m_a(&config.data_dir, demo_enabled, configured)?;
         if demo_enabled {
             store.init_k_session(&config.data_dir)?;
         }

@@ -49,6 +49,13 @@ location = "https://auth.elide.internal/v1/discharge"
 [auth.demo]
 # Defaults to <data_dir>/auth.sock when omitted.
 socket = "mint_data/auth.sock"
+# K_M-A, the TPC-CID wrapping key, as standard base64 of 32 bytes
+# (e.g. `openssl rand -base64 32`). Set this ONLY for the distributed
+# demo, where mint and the coordinator run on separate hosts: render the
+# same generated value into both configs so each side can self-issue the
+# operator discharges it needs without a cross-host auth call. Omit for
+# the single-host fixture — mint then generates K_M-A on first start.
+# k_m_a = "REPLACE_WITH_BASE64_32_BYTE_KEY"
 
 [attestation]
 # Discharge URL for the attested caveat of any [role.attestation] role.

@@ -426,7 +426,10 @@ async fn open_store(cfg: &Config) -> Result<(Store, TigrisHandles), Box<dyn std:
     // auth-service binary provisioned it. K_session is purely the demo
     // auth role's session root — generated only under `[auth.demo]`.
     if demo_enabled || cfg.auth_location.is_some() {
-        store.init_k_m_a(&cfg.data_dir, demo_enabled)?;
+        // `[auth.demo].k_m_a`, when set, is the distributed-demo shared
+        // secret — used verbatim so mint matches the coordinator's copy.
+        let configured = cfg.demo_auth.as_ref().and_then(|d| d.k_m_a);
+        store.init_k_m_a(&cfg.data_dir, demo_enabled, configured)?;
         if demo_enabled {
             store.init_k_session(&cfg.data_dir)?;
         }

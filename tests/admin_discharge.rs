@@ -115,7 +115,9 @@ async fn app_seeded(serving: bool) -> (Router, Router, tempfile::TempDir) {
     let mut store = Store::open_local_with_initial_key(dir.path(), Some(ROOT))
         .await
         .expect("store");
-    store.init_k_m_a(dir.path(), true).expect("init_k_m_a");
+    store
+        .init_k_m_a(dir.path(), true, None)
+        .expect("init_k_m_a");
     store.init_k_session(dir.path()).expect("init_k_session");
     let mut cfg = config();
     // Co-locate data_dir with the store so the seal endpoint's sealed

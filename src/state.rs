@@ -539,34 +539,61 @@ impl Store {
         }
     }
 
-    /// Load or — when `demo_enabled` is true and the file is absent —
-    /// generate the K_M-A wrapping key under `<dir>/k_m_a`. Mutates
-    /// `self.k_m_a`. Called from the bootstrap path once the Store
-    /// has been opened and the auth-mode is known from config.
+    /// Establish the K_M-A wrapping key, mutating `self.k_m_a`. Called
+    /// from the bootstrap path once the Store has been opened and the
+    /// auth-mode is known from config. The source, in precedence order:
     ///
-    /// On disk: 64 ASCII hex characters (the canonical 32-byte
-    /// representation, matching the keyring's per-generation files),
-    /// no newline, mode 0600. Same custody discipline as the
-    /// keyring — anyone with filesystem read on `data_dir` already
-    /// has the keys mint depends on.
-    pub fn init_k_m_a(&mut self, dir: &Path, demo_enabled: bool) -> io::Result<()> {
+    /// 1. `configured` — a `[auth.demo].k_m_a` from config (the
+    ///    distributed-demo shared secret). Authoritative: it is also
+    ///    persisted to `<dir>/auth-shared.key` (overwriting any prior
+    ///    value) so the on-disk file always reflects the live key — it
+    ///    stays `ls`-inspectable, and dropping `k_m_a` from config later
+    ///    carries the same value forward via the file rather than silently
+    ///    reverting to a stale generated one.
+    /// 2. `<dir>/auth-shared.key` on disk, if present — 64 ASCII hex
+    ///    characters (the canonical 32-byte representation, matching the
+    ///    keyring's per-generation files), no newline, mode 0600. Same
+    ///    custody discipline as the keyring.
+    /// 3. Freshly generated and persisted to that path — only when
+    ///    `demo_enabled` (the single-process fixture); a non-demo mint with
+    ///    no provisioned key fails closed.
+    pub fn init_k_m_a(
+        &mut self,
+        dir: &Path,
+        demo_enabled: bool,
+        configured: Option<[u8; 32]>,
+    ) -> io::Result<()> {
         let path = dir.join(K_M_A_FILE);
-        let bytes = match std::fs::read_to_string(&path) {
-            Ok(s) => unhex32(s.trim())
-                .ok_or_else(|| io::Error::other(format!("{path:?}: not 64 hex bytes")))?,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                if !demo_enabled {
-                    return Err(io::Error::other(format!(
-                        "K_M-A absent at {path:?}; mint requires auth-service \
-                         enrollment or [auth.demo]"
-                    )));
+        let bytes = match configured {
+            // Config is authoritative; mirror it onto disk so the file is
+            // never stale. Write only when it differs (or is absent) to keep
+            // restarts idempotent.
+            Some(k) => {
+                let on_disk = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|s| unhex32(s.trim()));
+                if on_disk != Some(k) {
+                    write_key_file(&path, &hex32(&k))?;
                 }
-                let mut fresh = [0u8; 32];
-                rand_core::OsRng.fill_bytes(&mut fresh);
-                write_key_file(&path, &hex32(&fresh))?;
-                fresh
+                k
             }
-            Err(e) => return Err(e),
+            None => match std::fs::read_to_string(&path) {
+                Ok(s) => unhex32(s.trim())
+                    .ok_or_else(|| io::Error::other(format!("{path:?}: not 64 hex bytes")))?,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    if !demo_enabled {
+                        return Err(io::Error::other(format!(
+                            "K_M-A absent at {path:?}; mint requires auth-service \
+                             enrollment or [auth.demo]"
+                        )));
+                    }
+                    let mut fresh = [0u8; 32];
+                    rand_core::OsRng.fill_bytes(&mut fresh);
+                    write_key_file(&path, &hex32(&fresh))?;
+                    fresh
+                }
+                Err(e) => return Err(e),
+            },
         };
         self.k_m_a = Some(Arc::new(bytes));
         // Demo mode assigns the conventional OrgId; production
@@ -1733,14 +1760,14 @@ mod tests {
     async fn k_m_a_generated_on_first_start_with_demo_enabled() {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open_local(d.path()).await.unwrap();
-        s.init_k_m_a(d.path(), true).expect("init");
+        s.init_k_m_a(d.path(), true, None).expect("init");
         let first = *s.k_m_a().expect("present");
         // File exists and is mode 0600.
         let meta = std::fs::metadata(d.path().join(K_M_A_FILE)).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         // Restart loads the same bytes.
         let mut s2 = Store::open_local(d.path()).await.unwrap();
-        s2.init_k_m_a(d.path(), true).expect("init");
+        s2.init_k_m_a(d.path(), true, None).expect("init");
         assert_eq!(first, *s2.k_m_a().expect("present"));
     }
 
@@ -1763,7 +1790,9 @@ mod tests {
     async fn k_m_a_absent_without_demo_is_an_error() {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open_local(d.path()).await.unwrap();
-        let err = s.init_k_m_a(d.path(), false).expect_err("must refuse");
+        let err = s
+            .init_k_m_a(d.path(), false, None)
+            .expect_err("must refuse");
         assert!(format!("{err}").contains("K_M-A"));
     }
 
@@ -1772,7 +1801,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open_local(d.path()).await.unwrap();
         assert!(s.k_m_b().is_none(), "absent until init");
-        s.init_k_m_a(d.path(), true).expect("init k_m_a");
+        s.init_k_m_a(d.path(), true, None).expect("init k_m_a");
         s.init_k_m_b(d.path(), true).expect("init k_m_b");
         let k_m_a = *s.k_m_a().expect("k_m_a present");
         let k_m_b = *s.k_m_b().expect("k_m_b present");
@@ -1796,6 +1825,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn k_m_a_from_config_is_used_and_mirrored_to_disk() {
+        // The distributed-demo shape: K_M-A comes from config (shared with
+        // the coordinator). init uses it and persists it to auth-shared.key
+        // so the on-disk file reflects the live key, mode 0600.
+        let d = tempfile::tempdir().unwrap();
+        let mut s = Store::open_local(d.path()).await.unwrap();
+        let configured = [42u8; 32];
+        s.init_k_m_a(d.path(), true, Some(configured))
+            .expect("init");
+        assert_eq!(*s.k_m_a().expect("present"), configured);
+        let path = d.path().join(K_M_A_FILE);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().trim(),
+            hex32(&configured),
+            "config-sourced K_M-A is mirrored to disk"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // org_id is still settled to the demo org, as on the generated path.
+        assert_eq!(s.org_id(), Some("demo"));
+    }
+
+    #[tokio::test]
+    async fn k_m_a_from_config_overwrites_a_stale_disk_file() {
+        // A leftover auth-shared.key from a prior generated run must not
+        // shadow an explicit config value — config is authoritative and the
+        // file is rewritten so it cannot drift from the live key.
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(K_M_A_FILE), hex32(&[7u8; 32])).unwrap();
+        let mut s = Store::open_local(d.path()).await.unwrap();
+        s.init_k_m_a(d.path(), true, Some([42u8; 32]))
+            .expect("init");
+        assert_eq!(*s.k_m_a().unwrap(), [42u8; 32]);
+        assert_eq!(
+            std::fs::read_to_string(d.path().join(K_M_A_FILE))
+                .unwrap()
+                .trim(),
+            hex32(&[42u8; 32]),
+            "stale on-disk key is overwritten with the config value"
+        );
+    }
+
+    #[tokio::test]
     async fn k_m_a_loads_existing_file_even_without_demo() {
         // Once an operator has provisioned K_M-A (via auth-service
         // enrollment in production, or via demo-mode first-start),
@@ -1803,7 +1877,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join(K_M_A_FILE), hex32(&[7u8; 32])).unwrap();
         let mut s = Store::open_local(d.path()).await.unwrap();
-        s.init_k_m_a(d.path(), false).expect("loads");
+        s.init_k_m_a(d.path(), false, None).expect("loads");
         assert_eq!(*s.k_m_a().unwrap(), [7u8; 32]);
     }
 
