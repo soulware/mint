@@ -267,6 +267,56 @@ async fn happy_path_discharge_then_invite_read() {
 }
 
 #[tokio::test]
+async fn invite_read_is_stable_until_rotate() {
+    // The invite macaroon is cached and reused: repeated reads return the
+    // *same* string, a rotate re-mints it, and the post-rotate string is
+    // itself stable. (Each mint draws a fresh per-token nonce, so without
+    // the cache every read would differ.)
+    let (mint_router, auth_router, _dir) = app().await;
+    let token = admin_service();
+    let discharge = fetch_discharge(auth_router, &admin_service_cid(&token)).await;
+
+    let read_invite = async |router: Router, op: &str, method: &str, uri: &str| {
+        let body = format!(r#"{{"ts":{}}}"#, now());
+        let req = admin_request(&token, &discharge, op, method, uri, &body);
+        let (status, body) = body_string(router.oneshot(req).await.unwrap()).await;
+        assert_eq!(status, StatusCode::OK, "{uri} body: {body}");
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["macaroon"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+
+    let m1 = read_invite(
+        mint_router.clone(),
+        OP_INVITE_READ,
+        "POST",
+        "/v1/admin/invite",
+    )
+    .await;
+    let m2 = read_invite(
+        mint_router.clone(),
+        OP_INVITE_READ,
+        "POST",
+        "/v1/admin/invite",
+    )
+    .await;
+    assert_eq!(m1, m2, "consecutive invite reads should return one string");
+
+    let m3 = read_invite(
+        mint_router.clone(),
+        OP_INVITE_ROTATE,
+        "POST",
+        "/v1/admin/invite/rotate",
+    )
+    .await;
+    assert_ne!(m1, m3, "rotation should change the invite macaroon");
+
+    let m4 = read_invite(mint_router, OP_INVITE_READ, "POST", "/v1/admin/invite").await;
+    assert_eq!(m3, m4, "post-rotation invite should itself be stable");
+}
+
+#[tokio::test]
 async fn one_wide_discharge_satisfies_every_verb() {
     // The discharge carries no `op` — per-verb narrowing is the
     // operator's attenuation onto the admin-service. So a single fetched

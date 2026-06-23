@@ -190,13 +190,30 @@ async fn build_invite(state: &AppState) -> Result<InviteResponse, Response> {
     // The invite carries the enroll gate, so minting one requires the
     // auth integration that stamps its TPC. A mint with no auth has no
     // enrollment plane — there is no PoP-only fallback, by design
-    // (`docs/design-mint.md` § *Enrollment*).
+    // (`docs/design-mint.md` § *Enrollment*). Checked before the cache so
+    // an auth-less mint still fails closed rather than serving a stale
+    // cached invite.
     let k_m_a = state.store.k_m_a().copied().ok_or_else(|| {
         service_unavailable("invite requires an auth integration (K_M-A) for its enroll gate")
     })?;
     let location = state.config.auth_location.as_deref().ok_or_else(|| {
         service_unavailable("invite requires auth_location for its discharge location")
     })?;
+    // Best-effort reuse: a cached macaroon minted for the current
+    // `(nonce, audience)` is returned verbatim, so repeated `mint invite`
+    // calls hand back a stable string until the nonce rotates. A cache
+    // miss or a backend hiccup just falls through to a fresh mint.
+    match state
+        .store
+        .cached_invite_macaroon(&nonce, &state.config.audience)
+        .await
+    {
+        Ok(Some(macaroon)) => return Ok(InviteResponse { macaroon, nonce }),
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(target: "mint::admin", error = %e, "invite cache read failed; minting fresh")
+        }
+    }
     let org_id = state.store.org_id().unwrap_or("demo").to_string();
     let keyring = state.store.keyring().await;
     let mac = mint_invite(
@@ -207,10 +224,17 @@ async fn build_invite(state: &AppState) -> Result<InviteResponse, Response> {
         &org_id,
         location,
     );
-    Ok(InviteResponse {
-        macaroon: mac.encode(),
-        nonce,
-    })
+    let macaroon = mac.encode();
+    // Cache for reuse; a write failure is non-fatal — the freshly minted
+    // invite is still returned.
+    if let Err(e) = state
+        .store
+        .put_invite_macaroon(&nonce, &state.config.audience, &macaroon)
+        .await
+    {
+        tracing::warn!(target: "mint::admin", error = %e, "invite cache write failed");
+    }
+    Ok(InviteResponse { macaroon, nonce })
 }
 
 #[derive(Serialize, Deserialize)]
