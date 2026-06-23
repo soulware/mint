@@ -66,7 +66,7 @@ async fn full_flow_over_unix_socket() {
     // Colocated demo auth: K_M-A keys the gate TPCs, K_session the
     // operator login the client performs before enrolling.
     store_inner
-        .init_k_m_a(srv_dir.path(), true)
+        .init_k_m_a(srv_dir.path(), true, None)
         .expect("init k_m_a");
     store_inner
         .init_k_session(srv_dir.path())

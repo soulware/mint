@@ -63,6 +63,11 @@ pub enum ConfigError {
     )]
     DemoAttestationWithoutDemoAuth,
     #[error(
+        "[auth.demo].k_m_a is not a valid key: expected standard base64 of a \
+         32-byte value ({reason})"
+    )]
+    BadDemoKMA { reason: String },
+    #[error(
         "role {role}: binds a non-reserved caveat (so it is attested) but no \
          [attestation].location is configured to discharge it"
     )]
@@ -89,6 +94,23 @@ fn canonical_field_set(mut fields: Vec<String>) -> Vec<String> {
     fields.sort();
     fields.dedup();
     fields
+}
+
+/// Decode a `[auth.demo].k_m_a` value: standard base64 of exactly 32
+/// bytes. The wire form is standard base64 (e.g. `openssl rand -base64 32`)
+/// so a deploy can render one generated value identically into both
+/// `mint.toml` and the coordinator's config without the two drifting.
+fn decode_demo_k_m_a(value: &str) -> Result<[u8; 32], ConfigError> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(value.trim())
+        .map_err(|e| ConfigError::BadDemoKMA {
+            reason: e.to_string(),
+        })?;
+    let len = bytes.len();
+    bytes.try_into().map_err(|_| ConfigError::BadDemoKMA {
+        reason: format!("decoded {len} bytes, need 32"),
+    })
 }
 
 /// Strip a namespace prefix (`attested.`/`caveat.`) off each
@@ -205,11 +227,21 @@ pub struct RawDemoAuth {
     /// UDS path the colocated auth role binds for `/v1/login` +
     /// `/v1/discharge`, and the transport the operator/client dial to reach
     /// it. Path-only (UDS-only). Defaults to `<data_dir>/auth.sock` when
-    /// omitted. (`K_M-A` and `K_session` are generated on first start; mint
+    /// omitted. (`K_session` is generated on first start; mint
     /// must itself be bound to loopback or UDS — see
     /// `docs/design-auth-service.md` § *Mint as auth (demo only)*.)
     #[serde(default)]
     pub socket: Option<String>,
+    /// `K_M-A`, the TPC-CID wrapping key, as standard base64 of 32 bytes
+    /// (e.g. the output of `openssl rand -base64 32`). Supplied **only** in
+    /// the distributed demo, where mint and the coordinator run on separate
+    /// hosts and both source the *same* value from config so each can
+    /// self-issue the operator discharges it needs without a cross-host auth
+    /// call (`docs/design-auth-service.md` § *Proposed: distributed demo —
+    /// shared K_M-A*). Omit for the single-process fixture, where mint
+    /// generates `K_M-A` on first start.
+    #[serde(default)]
+    pub k_m_a: Option<String>,
 }
 
 /// `[attestation.demo]` block: colocate the attestation authority and bind
@@ -383,6 +415,11 @@ pub struct DemoAuth {
     /// dial to reach it. Resolved from `[auth.demo].socket` (explicit) or
     /// `<data_dir>/auth.sock` (default).
     pub socket: PathBuf,
+    /// The configured `K_M-A` (the distributed-demo shared secret),
+    /// decoded from `[auth.demo].k_m_a`. `Some` only when the operator
+    /// supplied it; `None` leaves mint to generate `K_M-A` on first start
+    /// (the single-process fixture).
+    pub k_m_a: Option<[u8; 32]>,
 }
 
 /// Colocated demo attestation authority, post-validation. Present iff
@@ -571,13 +608,22 @@ impl Config {
         let listener = resolve_listener(raw.bind.as_deref(), raw.socket.as_deref(), &data_dir)?;
         // Presence of the `[*.demo]` table is the switch; the socket always
         // resolves (an explicit path, else the per-role default under
-        // `data_dir`).
-        let demo_auth = demo_auth_raw.map(|d| DemoAuth {
-            socket: d
-                .socket
-                .map(PathBuf::from)
-                .unwrap_or_else(|| data_dir.join("auth.sock")),
-        });
+        // `data_dir`). `k_m_a` is optional even within the demo table — set
+        // only for the distributed shape where the value is shared with the
+        // coordinator.
+        let demo_auth = match demo_auth_raw {
+            Some(d) => {
+                let k_m_a = d.k_m_a.as_deref().map(decode_demo_k_m_a).transpose()?;
+                Some(DemoAuth {
+                    socket: d
+                        .socket
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| data_dir.join("auth.sock")),
+                    k_m_a,
+                })
+            }
+            None => None,
+        };
         let demo_attestation = demo_attestation_raw.map(|d| DemoAttestation {
             socket: d
                 .socket
@@ -1102,6 +1148,43 @@ policy_file = "r.json"
         // Omitting the table leaves no colocated auth role.
         let c = parse_for_test(SAMPLE, &[("volume-ro.json", "{}")]).expect("parse");
         assert!(c.demo_auth.is_none(), "no [auth.demo] table → no demo auth");
+    }
+
+    #[test]
+    fn demo_auth_k_m_a_decodes_from_standard_base64() {
+        use base64::Engine as _;
+        let key = [9u8; 32];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(key);
+        let toml = with_block(SAMPLE, &format!("[auth.demo]\nk_m_a = \"{b64}\""));
+        let c = parse_for_test(&toml, &[("volume-ro.json", "{}")]).expect("parse");
+        assert_eq!(c.demo_auth.expect("demo_auth present").k_m_a, Some(key));
+    }
+
+    #[test]
+    fn demo_auth_k_m_a_absent_leaves_it_none() {
+        // The single-process fixture: `[auth.demo]` with no `k_m_a` means
+        // mint generates K_M-A itself at startup.
+        let toml = with_block(SAMPLE, "[auth.demo]");
+        let c = parse_for_test(&toml, &[("volume-ro.json", "{}")]).expect("parse");
+        assert_eq!(c.demo_auth.expect("demo_auth present").k_m_a, None);
+    }
+
+    #[test]
+    fn demo_auth_k_m_a_rejects_malformed_or_wrong_length() {
+        use base64::Engine as _;
+        // Not base64 at all.
+        let toml = with_block(SAMPLE, "[auth.demo]\nk_m_a = \"not base64!!!\"");
+        assert!(matches!(
+            parse_for_test(&toml, &[("volume-ro.json", "{}")]),
+            Err(ConfigError::BadDemoKMA { .. })
+        ));
+        // Valid base64, but 16 bytes rather than the required 32.
+        let short = base64::engine::general_purpose::STANDARD.encode([0u8; 16]);
+        let toml = with_block(SAMPLE, &format!("[auth.demo]\nk_m_a = \"{short}\""));
+        assert!(matches!(
+            parse_for_test(&toml, &[("volume-ro.json", "{}")]),
+            Err(ConfigError::BadDemoKMA { .. })
+        ));
     }
 
     #[test]

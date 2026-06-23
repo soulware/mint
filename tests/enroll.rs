@@ -122,7 +122,7 @@ async fn app() -> (
         .await
         .expect("store");
     store_inner
-        .init_k_m_a(dir.path(), true)
+        .init_k_m_a(dir.path(), true, None)
         .expect("init k_m_a");
     store_inner
         .init_k_m_b(dir.path(), true)
@@ -454,7 +454,7 @@ async fn app_in_memory() -> (axum::Router, Arc<Mutex<Vec<u8>>>, Arc<Store>) {
     let k_m_a_hex: String = K_M_A.iter().map(|b| format!("{b:02x}")).collect();
     std::fs::write(kdir.path().join(K_M_A_FILE), k_m_a_hex).expect("seed k_m_a");
     store_inner
-        .init_k_m_a(kdir.path(), true)
+        .init_k_m_a(kdir.path(), true, None)
         .expect("init k_m_a");
     let store = Arc::new(store_inner);
     let cfg = config();
