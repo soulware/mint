@@ -11,6 +11,9 @@
 //!
 //! ```text
 //! _mint/invite                       current random nonce (one object)
+//! _mint/invite_macaroon              {nonce, audience, macaroon}: the cached
+//!                                    reusable invite, re-minted when the nonce
+//!                                    or audience changes (one object)
 //! _mint/clients/pending/<sub>.json   transient (sub, pub, invite, first_seen, peer_ip);
 //!                                    deleted at approve(); overwritten by re-enroll
 //! _mint/clients/enrolled/<sub>       long-lived {pub, approved_by, approved_at,
@@ -88,6 +91,25 @@ pub const K_M_B_FILE: &str = "attestation-shared.key";
 /// (`[auth].demo_enabled`), where it roots the CLI ↔ auth session
 /// macaroons (`docs/design-auth-service.md` § *Login flow*).
 pub const K_SESSION_FILE: &str = "auth-session.key";
+
+/// The reusable invite macaroon cached at `_mint/invite_macaroon` so
+/// repeated `mint invite` reads hand back the same string. A single
+/// object, overwritten whenever a fresh invite is minted; the
+/// `(nonce, audience)` it was minted under gate its reuse so a nonce
+/// rotation or audience change re-mints rather than serving a stale
+/// invite. Best-effort: a missing or unparsable object just means mint
+/// fresh — it is never authoritative for verification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedInvite {
+    /// The invite nonce this macaroon embeds; reuse requires it to equal
+    /// the current `_mint/invite` nonce.
+    nonce: String,
+    /// The audience this macaroon was minted for; reuse requires it to
+    /// equal the configured audience.
+    audience: String,
+    /// The encoded invite macaroon (`mnt2_…`).
+    macaroon: String,
+}
 
 /// One pending-enrollment record (`_mint/clients/pending/<sub>.json`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -711,6 +733,10 @@ impl Store {
     fn invite_key() -> OPath {
         OPath::from(format!("{STATE_PREFIX}/invite"))
     }
+
+    fn invite_macaroon_key() -> OPath {
+        OPath::from(format!("{STATE_PREFIX}/invite_macaroon"))
+    }
     fn pending_key(sub: &str) -> OPath {
         OPath::from(format!("{STATE_PREFIX}/clients/pending/{sub}.json"))
     }
@@ -774,6 +800,54 @@ impl Store {
             return Err(StateError::Corrupt);
         }
         Ok(snap.value.clone())
+    }
+
+    /// Best-effort read of the cached invite macaroon. Returns the stored
+    /// encoded macaroon only if it was minted for the given `nonce` and
+    /// `audience`; a missing object, a stale `(nonce, audience)`, or an
+    /// unparsable body all yield `Ok(None)` so the caller mints fresh.
+    /// Only a live backend failure propagates.
+    pub async fn cached_invite_macaroon(
+        &self,
+        nonce: &str,
+        audience: &str,
+    ) -> Result<Option<String>, StateError> {
+        match self.objects.get(&Self::invite_macaroon_key()).await {
+            Ok(g) => {
+                let bytes = g.bytes().await?;
+                match serde_json::from_slice::<CachedInvite>(&bytes) {
+                    Ok(c) if c.nonce == nonce && c.audience == audience => Ok(Some(c.macaroon)),
+                    _ => Ok(None),
+                }
+            }
+            Err(OsError::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Persist the freshly minted invite macaroon under the current
+    /// `(nonce, audience)` so subsequent reads reuse the same string. A
+    /// single object, overwritten on each re-mint.
+    pub async fn put_invite_macaroon(
+        &self,
+        nonce: &str,
+        audience: &str,
+        macaroon: &str,
+    ) -> Result<(), StateError> {
+        let rec = CachedInvite {
+            nonce: nonce.to_string(),
+            audience: audience.to_string(),
+            macaroon: macaroon.to_string(),
+        };
+        let bytes = serde_json::to_vec(&rec).map_err(|_| StateError::Corrupt)?;
+        self.objects
+            .put_opts(
+                &Self::invite_macaroon_key(),
+                PutPayload::from(Bytes::from(bytes)),
+                PutOptions::default(),
+            )
+            .await?;
+        Ok(())
     }
 
     /// Spawn the background task that keeps `current_invite()` fresh
