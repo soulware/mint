@@ -17,7 +17,7 @@ use mint::http::{AppState, router};
 use mint::iam::FakeMinter;
 use mint::issuance::mint_invite;
 use mint::keyring::Keyring;
-use mint::state::{K_M_A_FILE, Store};
+use mint::state::{K_M_A_FILE, KeyProvisioning, Store};
 
 mod common;
 
@@ -66,7 +66,7 @@ async fn full_flow_over_unix_socket() {
     // Colocated demo auth: K_M-A keys the gate TPCs, K_session the
     // operator login the client performs before enrolling.
     store_inner
-        .init_k_m_a(srv_dir.path(), true, None)
+        .init_k_m_a(srv_dir.path(), KeyProvisioning::GenerateIfAbsent)
         .expect("init k_m_a");
     store_inner
         .init_k_session(srv_dir.path())
@@ -74,7 +74,7 @@ async fn full_flow_over_unix_socket() {
     // K_M-B keys the attested TPC the exchange stamps onto the `writer`
     // credential, and the demo attestation authority's discharge route.
     store_inner
-        .init_k_m_b(srv_dir.path(), true, None)
+        .init_k_m_b(srv_dir.path(), KeyProvisioning::GenerateIfAbsent)
         .expect("init k_m_b");
     let store = Arc::new(store_inner);
     let nonce = store.current_invite().await.expect("nonce");

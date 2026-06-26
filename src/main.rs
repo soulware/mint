@@ -20,7 +20,7 @@ use clap::{Parser, Subcommand};
 
 use mint::config::{Config, Listener};
 use mint::iam::KeypairMinter;
-use mint::state::Store;
+use mint::state::{KeyProvisioning, Store};
 use mint::tigris::TigrisMinter;
 
 #[derive(Parser)]
@@ -428,8 +428,9 @@ async fn open_store(cfg: &Config) -> Result<(Store, TigrisHandles), Box<dyn std:
     if demo_enabled || cfg.auth_location.is_some() {
         // `[auth.demo].k_m_a`, when set, is the distributed-demo shared
         // secret — used verbatim so mint matches the coordinator's copy.
-        let configured = cfg.demo_auth.as_ref().and_then(|d| d.k_m_a);
-        store.init_k_m_a(&cfg.data_dir, demo_enabled, configured)?;
+        let prov =
+            KeyProvisioning::resolve(cfg.demo_auth.as_ref().and_then(|d| d.k_m_a), demo_enabled);
+        store.init_k_m_a(&cfg.data_dir, prov)?;
         if demo_enabled {
             store.init_k_session(&cfg.data_dir)?;
         }
@@ -445,8 +446,11 @@ async fn open_store(cfg: &Config) -> Result<(Store, TigrisHandles), Box<dyn std:
         // `[attestation.demo].k_m_b`, when set, is the distributed-demo shared
         // secret — used verbatim so mint matches the attestation coordinator's
         // copy (mirrors the K_M-A path above).
-        let configured = cfg.demo_attestation.as_ref().and_then(|d| d.k_m_b);
-        store.init_k_m_b(&cfg.data_dir, demo_enabled, configured)?;
+        let prov = KeyProvisioning::resolve(
+            cfg.demo_attestation.as_ref().and_then(|d| d.k_m_b),
+            demo_enabled,
+        );
+        store.init_k_m_b(&cfg.data_dir, prov)?;
     }
     Ok((
         store,

@@ -28,7 +28,7 @@ use mint::iam::FakeMinter;
 use mint::keyring::Keyring;
 use mint::macaroon::{KeyRef, Macaroon, mint_under_key, mint_under_key_with_nonce};
 use mint::pop;
-use mint::state::Store;
+use mint::state::{KeyProvisioning, Store};
 use mint::tpc;
 use tower::ServiceExt;
 
@@ -116,7 +116,7 @@ async fn app_seeded(serving: bool) -> (Router, Router, tempfile::TempDir) {
         .await
         .expect("store");
     store
-        .init_k_m_a(dir.path(), true, None)
+        .init_k_m_a(dir.path(), KeyProvisioning::GenerateIfAbsent)
         .expect("init_k_m_a");
     store.init_k_session(dir.path()).expect("init_k_session");
     let mut cfg = config();

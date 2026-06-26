@@ -92,6 +92,84 @@ pub const K_M_B_FILE: &str = "attestation-shared.key";
 /// macaroons (`docs/design-auth-service.md` § *Login flow*).
 pub const K_SESSION_FILE: &str = "auth-session.key";
 
+/// How a shared wrapping key (K_M-A / K_M-B) is sourced at startup — the three
+/// real states the `(demo_enabled, configured)` pair used to encode, made
+/// explicit so the ambiguous "configured *and* demo" combination is
+/// unrepresentable.
+#[derive(Debug, Clone, Copy)]
+pub enum KeyProvisioning {
+    /// A config literal — `[auth.demo].k_m_a` / `[attestation.demo].k_m_b`, the
+    /// distributed-demo shared secret. Authoritative: also mirrored to disk so
+    /// the on-disk file tracks the live key.
+    Configured([u8; 32]),
+    /// Demo (single-host fixture): load the on-disk key, or generate and
+    /// persist one if absent.
+    GenerateIfAbsent,
+    /// Production: load the on-disk key, or fail closed if absent — the key is
+    /// provisioned out of band by the auth / attestation authority.
+    RequireProvisioned,
+}
+
+impl KeyProvisioning {
+    /// Resolve from a config literal and the demo flag: a literal wins;
+    /// otherwise demo generates and production requires.
+    pub fn resolve(configured: Option<[u8; 32]>, demo_enabled: bool) -> Self {
+        match (configured, demo_enabled) {
+            (Some(k), _) => Self::Configured(k),
+            (None, true) => Self::GenerateIfAbsent,
+            (None, false) => Self::RequireProvisioned,
+        }
+    }
+}
+
+/// Resolve a shared wrapping key's 32 bytes from `<dir>/<file>` per `prov`,
+/// persisting as needed under the keyring's custody (64 ASCII hex, mode 0600).
+/// `noun` and `requires` shape the fail-closed message of the
+/// [`RequireProvisioned`](KeyProvisioning::RequireProvisioned) path. The two
+/// `init_k_m_*` methods are thin wrappers over this, differing only in the file,
+/// the field they populate, and (for K_M-A) the `OrgId` assignment.
+fn load_shared_key(
+    dir: &Path,
+    file: &str,
+    prov: KeyProvisioning,
+    noun: &str,
+    requires: &str,
+) -> io::Result<[u8; 32]> {
+    let path = dir.join(file);
+    match prov {
+        // Config is authoritative; mirror it onto disk so the file is never
+        // stale. Write only when it differs (or is absent) to keep restarts
+        // idempotent.
+        KeyProvisioning::Configured(k) => {
+            let on_disk = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| unhex32(s.trim()));
+            if on_disk != Some(k) {
+                write_key_file(&path, &hex32(&k))?;
+            }
+            Ok(k)
+        }
+        KeyProvisioning::GenerateIfAbsent | KeyProvisioning::RequireProvisioned => {
+            match std::fs::read_to_string(&path) {
+                Ok(s) => unhex32(s.trim())
+                    .ok_or_else(|| io::Error::other(format!("{path:?}: not 64 hex bytes"))),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    if matches!(prov, KeyProvisioning::RequireProvisioned) {
+                        return Err(io::Error::other(format!(
+                            "{noun} absent at {path:?}; mint requires {requires}"
+                        )));
+                    }
+                    let mut fresh = [0u8; 32];
+                    rand_core::OsRng.fill_bytes(&mut fresh);
+                    write_key_file(&path, &hex32(&fresh))?;
+                    Ok(fresh)
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
+}
+
 /// The reusable invite macaroon cached at `_mint/invite_macaroon` so
 /// repeated `mint invite` reads hand back the same string. A single
 /// object, overwritten whenever a fresh invite is minted; the
@@ -561,66 +639,24 @@ impl Store {
         }
     }
 
-    /// Establish the K_M-A wrapping key, mutating `self.k_m_a`. Called
-    /// from the bootstrap path once the Store has been opened and the
-    /// auth-mode is known from config. The source, in precedence order:
-    ///
-    /// 1. `configured` — a `[auth.demo].k_m_a` from config (the
-    ///    distributed-demo shared secret). Authoritative: it is also
-    ///    persisted to `<dir>/auth-shared.key` (overwriting any prior
-    ///    value) so the on-disk file always reflects the live key — it
-    ///    stays `ls`-inspectable, and dropping `k_m_a` from config later
-    ///    carries the same value forward via the file rather than silently
-    ///    reverting to a stale generated one.
-    /// 2. `<dir>/auth-shared.key` on disk, if present — 64 ASCII hex
-    ///    characters (the canonical 32-byte representation, matching the
-    ///    keyring's per-generation files), no newline, mode 0600. Same
-    ///    custody discipline as the keyring.
-    /// 3. Freshly generated and persisted to that path — only when
-    ///    `demo_enabled` (the single-process fixture); a non-demo mint with
-    ///    no provisioned key fails closed.
-    pub fn init_k_m_a(
-        &mut self,
-        dir: &Path,
-        demo_enabled: bool,
-        configured: Option<[u8; 32]>,
-    ) -> io::Result<()> {
-        let path = dir.join(K_M_A_FILE);
-        let bytes = match configured {
-            // Config is authoritative; mirror it onto disk so the file is
-            // never stale. Write only when it differs (or is absent) to keep
-            // restarts idempotent.
-            Some(k) => {
-                let on_disk = std::fs::read_to_string(&path)
-                    .ok()
-                    .and_then(|s| unhex32(s.trim()));
-                if on_disk != Some(k) {
-                    write_key_file(&path, &hex32(&k))?;
-                }
-                k
-            }
-            None => match std::fs::read_to_string(&path) {
-                Ok(s) => unhex32(s.trim())
-                    .ok_or_else(|| io::Error::other(format!("{path:?}: not 64 hex bytes")))?,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    if !demo_enabled {
-                        return Err(io::Error::other(format!(
-                            "K_M-A absent at {path:?}; mint requires auth-service \
-                             enrollment or [auth.demo]"
-                        )));
-                    }
-                    let mut fresh = [0u8; 32];
-                    rand_core::OsRng.fill_bytes(&mut fresh);
-                    write_key_file(&path, &hex32(&fresh))?;
-                    fresh
-                }
-                Err(e) => return Err(e),
-            },
-        };
+    /// Establish the K_M-A wrapping key, mutating `self.k_m_a`. Called from the
+    /// bootstrap path once the Store is open and the auth mode is known from
+    /// config. `prov` selects the source (see [`KeyProvisioning`]);
+    /// [`load_shared_key`] holds the on-disk custody
+    /// (`<dir>/auth-shared.key`, 64 ASCII hex, mode 0600, same discipline as
+    /// the keyring). Demo mode also assigns the conventional `OrgId`.
+    pub fn init_k_m_a(&mut self, dir: &Path, prov: KeyProvisioning) -> io::Result<()> {
+        let bytes = load_shared_key(
+            dir,
+            K_M_A_FILE,
+            prov,
+            "K_M-A",
+            "auth-service enrollment or [auth.demo]",
+        )?;
         self.k_m_a = Some(Arc::new(bytes));
-        // Demo mode assigns the conventional OrgId; production
-        // deployments will receive OrgId from auth-service enrollment
-        // alongside K_M-A and persist it separately.
+        // Demo mode assigns the conventional OrgId; production deployments
+        // receive OrgId from auth-service enrollment alongside K_M-A and
+        // persist it separately.
         if self.org_id.is_none() {
             self.org_id = Some("demo".to_string());
         }
@@ -634,54 +670,21 @@ impl Store {
         self.k_m_a.as_deref()
     }
 
-    /// Establish the K_M-B wrapping key under `<dir>/attestation-shared.key`,
-    /// mutating `self.k_m_b`. Called from the bootstrap path when the config
-    /// declares an attestation role or colocates the demo attestation
-    /// authority. Mirrors [`init_k_m_a`](Store::init_k_m_a) and its source
-    /// precedence: `configured` (a `[attestation.demo].k_m_b` from config — the
-    /// distributed-demo shared secret, mirrored onto disk so the file tracks
-    /// the live key), else the on-disk key, else a freshly generated one when
-    /// `demo_enabled`. Same on-disk shape and custody (64 ASCII hex, mode
-    /// 0600). The org is settled by `init_k_m_a`, so this establishes only the
-    /// key.
-    pub fn init_k_m_b(
-        &mut self,
-        dir: &Path,
-        demo_enabled: bool,
-        configured: Option<[u8; 32]>,
-    ) -> io::Result<()> {
-        let path = dir.join(K_M_B_FILE);
-        let bytes = match configured {
-            // Config is authoritative; mirror it onto disk so the file is
-            // never stale. Write only when it differs (or is absent) to keep
-            // restarts idempotent.
-            Some(k) => {
-                let on_disk = std::fs::read_to_string(&path)
-                    .ok()
-                    .and_then(|s| unhex32(s.trim()));
-                if on_disk != Some(k) {
-                    write_key_file(&path, &hex32(&k))?;
-                }
-                k
-            }
-            None => match std::fs::read_to_string(&path) {
-                Ok(s) => unhex32(s.trim())
-                    .ok_or_else(|| io::Error::other(format!("{path:?}: not 64 hex bytes")))?,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    if !demo_enabled {
-                        return Err(io::Error::other(format!(
-                            "K_M-B absent at {path:?}; mint requires attestation-authority \
-                             enrollment or demo mode ([auth.demo])"
-                        )));
-                    }
-                    let mut fresh = [0u8; 32];
-                    rand_core::OsRng.fill_bytes(&mut fresh);
-                    write_key_file(&path, &hex32(&fresh))?;
-                    fresh
-                }
-                Err(e) => return Err(e),
-            },
-        };
+    /// Establish the K_M-B wrapping key, mutating `self.k_m_b`. Called from the
+    /// bootstrap path when the config declares an attestation role or colocates
+    /// the demo attestation authority. `prov` selects the source (see
+    /// [`KeyProvisioning`]); [`load_shared_key`] holds the on-disk custody
+    /// (`<dir>/attestation-shared.key`, 64 ASCII hex, mode 0600). The org is
+    /// settled by [`init_k_m_a`](Store::init_k_m_a), so this establishes only
+    /// the key.
+    pub fn init_k_m_b(&mut self, dir: &Path, prov: KeyProvisioning) -> io::Result<()> {
+        let bytes = load_shared_key(
+            dir,
+            K_M_B_FILE,
+            prov,
+            "K_M-B",
+            "attestation-authority enrollment or demo mode ([auth.demo])",
+        )?;
         self.k_m_b = Some(Arc::new(bytes));
         Ok(())
     }
@@ -1855,14 +1858,16 @@ mod tests {
     async fn k_m_a_generated_on_first_start_with_demo_enabled() {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open_local(d.path()).await.unwrap();
-        s.init_k_m_a(d.path(), true, None).expect("init");
+        s.init_k_m_a(d.path(), KeyProvisioning::GenerateIfAbsent)
+            .expect("init");
         let first = *s.k_m_a().expect("present");
         // File exists and is mode 0600.
         let meta = std::fs::metadata(d.path().join(K_M_A_FILE)).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         // Restart loads the same bytes.
         let mut s2 = Store::open_local(d.path()).await.unwrap();
-        s2.init_k_m_a(d.path(), true, None).expect("init");
+        s2.init_k_m_a(d.path(), KeyProvisioning::GenerateIfAbsent)
+            .expect("init");
         assert_eq!(first, *s2.k_m_a().expect("present"));
     }
 
@@ -1886,7 +1891,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open_local(d.path()).await.unwrap();
         let err = s
-            .init_k_m_a(d.path(), false, None)
+            .init_k_m_a(d.path(), KeyProvisioning::RequireProvisioned)
             .expect_err("must refuse");
         assert!(format!("{err}").contains("K_M-A"));
     }
@@ -1896,8 +1901,10 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open_local(d.path()).await.unwrap();
         assert!(s.k_m_b().is_none(), "absent until init");
-        s.init_k_m_a(d.path(), true, None).expect("init k_m_a");
-        s.init_k_m_b(d.path(), true, None).expect("init k_m_b");
+        s.init_k_m_a(d.path(), KeyProvisioning::GenerateIfAbsent)
+            .expect("init k_m_a");
+        s.init_k_m_b(d.path(), KeyProvisioning::GenerateIfAbsent)
+            .expect("init k_m_b");
         let k_m_a = *s.k_m_a().expect("k_m_a present");
         let k_m_b = *s.k_m_b().expect("k_m_b present");
         // Distinct keys, distinct files — never the same bytes even when
@@ -1907,7 +1914,8 @@ mod tests {
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         // Restart loads the same K_M-B bytes.
         let mut s2 = Store::open_local(d.path()).await.unwrap();
-        s2.init_k_m_b(d.path(), true, None).expect("init");
+        s2.init_k_m_b(d.path(), KeyProvisioning::GenerateIfAbsent)
+            .expect("init");
         assert_eq!(k_m_b, *s2.k_m_b().expect("present"));
     }
 
@@ -1916,7 +1924,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open_local(d.path()).await.unwrap();
         let err = s
-            .init_k_m_b(d.path(), false, None)
+            .init_k_m_b(d.path(), KeyProvisioning::RequireProvisioned)
             .expect_err("must refuse");
         assert!(format!("{err}").contains("K_M-B"));
     }
@@ -1930,7 +1938,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open_local(d.path()).await.unwrap();
         let configured = [42u8; 32];
-        s.init_k_m_b(d.path(), true, Some(configured))
+        s.init_k_m_b(d.path(), KeyProvisioning::Configured(configured))
             .expect("init");
         assert_eq!(*s.k_m_b().expect("present"), configured);
         let path = d.path().join(K_M_B_FILE);
@@ -1953,7 +1961,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join(K_M_B_FILE), hex32(&[7u8; 32])).unwrap();
         let mut s = Store::open_local(d.path()).await.unwrap();
-        s.init_k_m_b(d.path(), true, Some([42u8; 32]))
+        s.init_k_m_b(d.path(), KeyProvisioning::Configured([42u8; 32]))
             .expect("init");
         assert_eq!(*s.k_m_b().unwrap(), [42u8; 32]);
         assert_eq!(
@@ -1973,7 +1981,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open_local(d.path()).await.unwrap();
         let configured = [42u8; 32];
-        s.init_k_m_a(d.path(), true, Some(configured))
+        s.init_k_m_a(d.path(), KeyProvisioning::Configured(configured))
             .expect("init");
         assert_eq!(*s.k_m_a().expect("present"), configured);
         let path = d.path().join(K_M_A_FILE);
@@ -1998,7 +2006,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join(K_M_A_FILE), hex32(&[7u8; 32])).unwrap();
         let mut s = Store::open_local(d.path()).await.unwrap();
-        s.init_k_m_a(d.path(), true, Some([42u8; 32]))
+        s.init_k_m_a(d.path(), KeyProvisioning::Configured([42u8; 32]))
             .expect("init");
         assert_eq!(*s.k_m_a().unwrap(), [42u8; 32]);
         assert_eq!(
@@ -2018,7 +2026,8 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join(K_M_A_FILE), hex32(&[7u8; 32])).unwrap();
         let mut s = Store::open_local(d.path()).await.unwrap();
-        s.init_k_m_a(d.path(), false, None).expect("loads");
+        s.init_k_m_a(d.path(), KeyProvisioning::RequireProvisioned)
+            .expect("loads");
         assert_eq!(*s.k_m_a().unwrap(), [7u8; 32]);
     }
 

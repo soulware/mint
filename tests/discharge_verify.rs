@@ -16,7 +16,7 @@ use mint::iam::FakeMinter;
 use mint::keyring::Keyring;
 use mint::macaroon::{self, KeyRef, Macaroon};
 use mint::pop;
-use mint::state::Store;
+use mint::state::{KeyProvisioning, Store};
 use mint::tpc;
 use tower::ServiceExt;
 
@@ -73,7 +73,7 @@ async fn app() -> (axum::Router, tempfile::TempDir) {
         .await
         .expect("store");
     store
-        .init_k_m_a(dir.path(), true, None)
+        .init_k_m_a(dir.path(), KeyProvisioning::GenerateIfAbsent)
         .expect("init_k_m_a");
     let cfg = config();
     let seal = Arc::new(arc_swap::ArcSwap::from_pointee(
