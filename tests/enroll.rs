@@ -125,7 +125,7 @@ async fn app() -> (
         .init_k_m_a(dir.path(), true, None)
         .expect("init k_m_a");
     store_inner
-        .init_k_m_b(dir.path(), true)
+        .init_k_m_b(dir.path(), true, None)
         .expect("init k_m_b");
     let store = Arc::new(store_inner);
     let cfg = config();

@@ -82,7 +82,7 @@ async fn demo_state() -> (AppState, Arc<FakeMinter>, [u8; 32], tempfile::TempDir
         .expect("store");
     store.init_k_m_a(dir.path(), true, None).expect("k_m_a");
     store.init_k_session(dir.path()).expect("k_session");
-    store.init_k_m_b(dir.path(), true).expect("k_m_b");
+    store.init_k_m_b(dir.path(), true, None).expect("k_m_b");
     let k_m_b = *store.k_m_b().expect("k_m_b generated");
     store
         .approve(

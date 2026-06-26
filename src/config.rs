@@ -68,6 +68,11 @@ pub enum ConfigError {
     )]
     BadDemoKMA { reason: String },
     #[error(
+        "[attestation.demo].k_m_b is not a valid key: expected standard base64 \
+         of a 32-byte value ({reason})"
+    )]
+    BadDemoKMB { reason: String },
+    #[error(
         "role {role}: binds a non-reserved caveat (so it is attested) but no \
          [attestation].location is configured to discharge it"
     )]
@@ -96,21 +101,31 @@ fn canonical_field_set(mut fields: Vec<String>) -> Vec<String> {
     fields
 }
 
-/// Decode a `[auth.demo].k_m_a` value: standard base64 of exactly 32
-/// bytes. The wire form is standard base64 (e.g. `openssl rand -base64 32`)
-/// so a deploy can render one generated value identically into both
-/// `mint.toml` and the coordinator's config without the two drifting.
-fn decode_demo_k_m_a(value: &str) -> Result<[u8; 32], ConfigError> {
+/// Decode a shared demo key (`[auth.demo].k_m_a` / `[attestation.demo].k_m_b`):
+/// standard base64 of exactly 32 bytes. The wire form is standard base64 (e.g.
+/// `openssl rand -base64 32`) so a deploy can render one generated value
+/// identically into both `mint.toml` and the coordinator's config without the
+/// two drifting. Returns the failure reason for the caller to wrap in the
+/// key-specific [`ConfigError`] variant.
+fn decode_demo_key(value: &str) -> Result<[u8; 32], String> {
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(value.trim())
-        .map_err(|e| ConfigError::BadDemoKMA {
-            reason: e.to_string(),
-        })?;
+        .map_err(|e| e.to_string())?;
     let len = bytes.len();
-    bytes.try_into().map_err(|_| ConfigError::BadDemoKMA {
-        reason: format!("decoded {len} bytes, need 32"),
-    })
+    bytes
+        .try_into()
+        .map_err(|_| format!("decoded {len} bytes, need 32"))
+}
+
+/// Decode `[auth.demo].k_m_a`. See [`decode_demo_key`].
+fn decode_demo_k_m_a(value: &str) -> Result<[u8; 32], ConfigError> {
+    decode_demo_key(value).map_err(|reason| ConfigError::BadDemoKMA { reason })
+}
+
+/// Decode `[attestation.demo].k_m_b`. See [`decode_demo_key`].
+fn decode_demo_k_m_b(value: &str) -> Result<[u8; 32], ConfigError> {
+    decode_demo_key(value).map_err(|reason| ConfigError::BadDemoKMB { reason })
 }
 
 /// Strip a namespace prefix (`attested.`/`caveat.`) off each
@@ -253,11 +268,19 @@ pub struct RawDemoAttestation {
     /// UDS path the colocated attestation authority binds for
     /// `/v1/discharge`, and the transport the client dials to reach it.
     /// Path-only (UDS-only). Defaults to `<data_dir>/attest.sock` when
-    /// omitted. (`K_M-B` is generated on first start. Requires `[auth.demo]`:
-    /// the issuer is gated on the same login session the demo auth role
-    /// mints.)
+    /// omitted. (`K_M-B` is generated on first start when `k_m_b` is omitted.
+    /// Requires `[auth.demo]`: the issuer is gated on the same login session
+    /// the demo auth role mints.)
     #[serde(default)]
     pub socket: Option<String>,
+    /// `K_M-B`, the attestation TPC-CID wrapping key, as standard base64 of
+    /// 32 bytes. Supplied only in the distributed demo, where mint and the
+    /// attestation coordinator run on separate hosts and both source the
+    /// *same* value from config so the coordinator opens attestation CIDs
+    /// without holding a key mint generated. Omit for the single-process
+    /// fixture, where mint generates `K_M-B` on first start.
+    #[serde(default)]
+    pub k_m_b: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -430,6 +453,11 @@ pub struct DemoAttestation {
     /// client dials to reach it. Resolved from `[attestation.demo].socket`
     /// (explicit) or `<data_dir>/attest.sock` (default).
     pub socket: PathBuf,
+    /// The configured `K_M-B` (the distributed-demo shared secret), decoded
+    /// from `[attestation.demo].k_m_b`. `Some` only when the operator supplied
+    /// it; `None` leaves mint to generate `K_M-B` on first start (the
+    /// single-process fixture).
+    pub k_m_b: Option<[u8; 32]>,
 }
 
 /// Validated configuration, ready to serve.
@@ -624,12 +652,19 @@ impl Config {
             }
             None => None,
         };
-        let demo_attestation = demo_attestation_raw.map(|d| DemoAttestation {
-            socket: d
-                .socket
-                .map(PathBuf::from)
-                .unwrap_or_else(|| data_dir.join("attest.sock")),
-        });
+        let demo_attestation = match demo_attestation_raw {
+            Some(d) => {
+                let k_m_b = d.k_m_b.as_deref().map(decode_demo_k_m_b).transpose()?;
+                Some(DemoAttestation {
+                    socket: d
+                        .socket
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| data_dir.join("attest.sock")),
+                    k_m_b,
+                })
+            }
+            None => None,
+        };
         // The demo attestation authority gates issuance on the login
         // session the demo auth role mints (verified under K_session),
         // so it cannot exist without the colocated auth role.
@@ -1184,6 +1219,59 @@ policy_file = "r.json"
         assert!(matches!(
             parse_for_test(&toml, &[("volume-ro.json", "{}")]),
             Err(ConfigError::BadDemoKMA { .. })
+        ));
+    }
+
+    #[test]
+    fn demo_attestation_k_m_b_decodes_from_standard_base64() {
+        use base64::Engine as _;
+        let key = [9u8; 32];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(key);
+        // `[attestation.demo]` requires `[auth.demo]`; supply both.
+        let toml = with_block(
+            SAMPLE,
+            &format!("[auth.demo]\n\n[attestation.demo]\nk_m_b = \"{b64}\""),
+        );
+        let c = parse_for_test(&toml, &[("volume-ro.json", "{}")]).expect("parse");
+        assert_eq!(
+            c.demo_attestation.expect("demo_attestation present").k_m_b,
+            Some(key)
+        );
+    }
+
+    #[test]
+    fn demo_attestation_k_m_b_absent_leaves_it_none() {
+        // The single-process fixture: `[attestation.demo]` with no `k_m_b`
+        // means mint generates K_M-B itself at startup.
+        let toml = with_block(SAMPLE, "[auth.demo]\n\n[attestation.demo]");
+        let c = parse_for_test(&toml, &[("volume-ro.json", "{}")]).expect("parse");
+        assert_eq!(
+            c.demo_attestation.expect("demo_attestation present").k_m_b,
+            None
+        );
+    }
+
+    #[test]
+    fn demo_attestation_k_m_b_rejects_malformed_or_wrong_length() {
+        use base64::Engine as _;
+        // Not base64 at all.
+        let toml = with_block(
+            SAMPLE,
+            "[auth.demo]\n\n[attestation.demo]\nk_m_b = \"not base64!!!\"",
+        );
+        assert!(matches!(
+            parse_for_test(&toml, &[("volume-ro.json", "{}")]),
+            Err(ConfigError::BadDemoKMB { .. })
+        ));
+        // Valid base64, but 16 bytes rather than the required 32.
+        let short = base64::engine::general_purpose::STANDARD.encode([0u8; 16]);
+        let toml = with_block(
+            SAMPLE,
+            &format!("[auth.demo]\n\n[attestation.demo]\nk_m_b = \"{short}\""),
+        );
+        assert!(matches!(
+            parse_for_test(&toml, &[("volume-ro.json", "{}")]),
+            Err(ConfigError::BadDemoKMB { .. })
         ));
     }
 

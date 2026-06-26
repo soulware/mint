@@ -52,7 +52,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let attest_demo = config.demo_attestation.is_some();
     if config.roles.values().any(|r| r.is_attested()) || attest_demo {
-        store.init_k_m_b(&config.data_dir, demo_enabled)?;
+        let configured = config.demo_attestation.as_ref().and_then(|d| d.k_m_b);
+        store.init_k_m_b(&config.data_dir, demo_enabled, configured)?;
     }
 
     let minter: Arc<dyn KeypairMinter> = Arc::new(FakeMinter::new());
