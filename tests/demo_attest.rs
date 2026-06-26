@@ -20,7 +20,7 @@ use mint::issuance::{AttestedTpc, mint_intermediate};
 use mint::keyring::Keyring;
 use mint::macaroon::Macaroon;
 use mint::pop;
-use mint::state::Store;
+use mint::state::{KeyProvisioning, Store};
 use tower::ServiceExt;
 
 mod common;
@@ -80,9 +80,13 @@ async fn demo_state() -> (AppState, Arc<FakeMinter>, [u8; 32], tempfile::TempDir
     let mut store = Store::open_local_with_initial_key(dir.path(), Some(ROOT))
         .await
         .expect("store");
-    store.init_k_m_a(dir.path(), true, None).expect("k_m_a");
+    store
+        .init_k_m_a(dir.path(), KeyProvisioning::GenerateIfAbsent)
+        .expect("k_m_a");
     store.init_k_session(dir.path()).expect("k_session");
-    store.init_k_m_b(dir.path(), true, None).expect("k_m_b");
+    store
+        .init_k_m_b(dir.path(), KeyProvisioning::GenerateIfAbsent)
+        .expect("k_m_b");
     let k_m_b = *store.k_m_b().expect("k_m_b generated");
     store
         .approve(

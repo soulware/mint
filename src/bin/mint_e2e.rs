@@ -12,7 +12,7 @@ use clap::Parser;
 
 use mint::config::Config;
 use mint::iam::{FakeMinter, KeypairMinter};
-use mint::state::Store;
+use mint::state::{KeyProvisioning, Store};
 
 #[derive(Parser)]
 #[command(about = "hermetic mint daemon for end-to-end tests (FakeMinter + local store)")]
@@ -44,16 +44,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let demo_enabled = config.demo_auth.is_some();
     let mut store = Store::open_local(&config.data_dir).await?;
     if demo_enabled || config.auth_location.is_some() {
-        let configured = config.demo_auth.as_ref().and_then(|d| d.k_m_a);
-        store.init_k_m_a(&config.data_dir, demo_enabled, configured)?;
+        let prov = KeyProvisioning::resolve(
+            config.demo_auth.as_ref().and_then(|d| d.k_m_a),
+            demo_enabled,
+        );
+        store.init_k_m_a(&config.data_dir, prov)?;
         if demo_enabled {
             store.init_k_session(&config.data_dir)?;
         }
     }
     let attest_demo = config.demo_attestation.is_some();
     if config.roles.values().any(|r| r.is_attested()) || attest_demo {
-        let configured = config.demo_attestation.as_ref().and_then(|d| d.k_m_b);
-        store.init_k_m_b(&config.data_dir, demo_enabled, configured)?;
+        let prov = KeyProvisioning::resolve(
+            config.demo_attestation.as_ref().and_then(|d| d.k_m_b),
+            demo_enabled,
+        );
+        store.init_k_m_b(&config.data_dir, prov)?;
     }
 
     let minter: Arc<dyn KeypairMinter> = Arc::new(FakeMinter::new());

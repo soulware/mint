@@ -20,7 +20,7 @@ use mint::issuance::{mint_credential_ticket, mint_invite};
 use mint::keyring::Keyring;
 use mint::macaroon::{KeyRef, Macaroon, mint_under_key_with_nonce};
 use mint::pop;
-use mint::state::{K_M_A_FILE, K_M_B_FILE, Store};
+use mint::state::{K_M_A_FILE, K_M_B_FILE, KeyProvisioning, Store};
 use mint::tpc;
 use tower::ServiceExt;
 
@@ -122,10 +122,10 @@ async fn app() -> (
         .await
         .expect("store");
     store_inner
-        .init_k_m_a(dir.path(), true, None)
+        .init_k_m_a(dir.path(), KeyProvisioning::GenerateIfAbsent)
         .expect("init k_m_a");
     store_inner
-        .init_k_m_b(dir.path(), true, None)
+        .init_k_m_b(dir.path(), KeyProvisioning::GenerateIfAbsent)
         .expect("init k_m_b");
     let store = Arc::new(store_inner);
     let cfg = config();
@@ -454,7 +454,7 @@ async fn app_in_memory() -> (axum::Router, Arc<Mutex<Vec<u8>>>, Arc<Store>) {
     let k_m_a_hex: String = K_M_A.iter().map(|b| format!("{b:02x}")).collect();
     std::fs::write(kdir.path().join(K_M_A_FILE), k_m_a_hex).expect("seed k_m_a");
     store_inner
-        .init_k_m_a(kdir.path(), true, None)
+        .init_k_m_a(kdir.path(), KeyProvisioning::GenerateIfAbsent)
         .expect("init k_m_a");
     let store = Arc::new(store_inner);
     let cfg = config();
