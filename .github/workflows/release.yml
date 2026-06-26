@@ -76,6 +76,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # A semver pre-release tag carries a hyphen (v1.2.3-rc1, -alpha, …);
+          # publish those as a GitHub pre-release so they are never badged
+          # "Latest". A plain vX.Y.Z is a final release.
+          extra=""
+          case "$GITHUB_REF_NAME" in *-*) extra="--prerelease" ;; esac
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes $extra
           gh release upload "$GITHUB_REF_NAME" "$ASSET" "$ASSET.sha256" --clobber
