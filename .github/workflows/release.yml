@@ -1,0 +1,81 @@
+name: release
+
+# Build the `mint` release binary and publish it as a GitHub Release asset on a
+# `v*` tag push. Downstream deployments (e.g. elide's deploy/mint image) pull
+# this artifact and verify its checksum instead of compiling mint from source.
+#
+# This is a deliberately generic, copy-able shape: the only repo-specific bits
+# are BIN (the binary name) and the build matrix. The same workflow is intended
+# to be lifted into the elide repo for its binaries — extend BIN to a loop or
+# add matrix targets there.
+#
+# Tags point at commits that have already passed `ci.yml` on the PR to main, so
+# this workflow builds and ships; it does not re-run fmt/clippy/test.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the Release and upload assets
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BIN: mint
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          # Built on ubuntu-24.04 so the glibc the binary links against matches
+          # the ubuntu:24.04 runtime image the deploy Dockerfile runs it on.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mint-release-${{ matrix.target }}
+
+      # --locked builds against the committed Cargo.lock so the released binary
+      # is reproducible from the tagged tree.
+      - name: Build
+        run: cargo build --release --locked --bin "$BIN" --target ${{ matrix.target }}
+
+      - name: Smoke-test the binary
+        run: ./target/${{ matrix.target }}/release/"$BIN" --help
+
+      # Name the asset by target triple (no version) so the consumer's download
+      # URL is stable across releases; the tag carries the version. The .sha256
+      # uses the asset's own name, so `sha256sum -c` passes against the file the
+      # consumer downloads under the same name.
+      - name: Stage artifact + checksum
+        run: |
+          asset="$BIN-${{ matrix.target }}"
+          install -m 0755 "target/${{ matrix.target }}/release/$BIN" "$asset"
+          sha256sum "$asset" > "$asset.sha256"
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
+
+      # Idempotent: the first matrix job creates the Release, later ones reuse
+      # it. --clobber lets a re-run of the same tag replace its assets.
+      - name: Publish to the Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" "$ASSET" "$ASSET.sha256" --clobber
