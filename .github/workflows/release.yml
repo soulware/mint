@@ -2,15 +2,15 @@ name: release
 
 # Build the `mint` release binary and publish it as a GitHub Release asset on a
 # `v*` tag push. Downstream deployments (e.g. elide's deploy/mint image) pull
-# this artifact and verify its checksum instead of compiling mint from source.
+# this prebuilt artifact and verify its checksum.
 #
 # This is a deliberately generic, copy-able shape: the only repo-specific bits
 # are BIN (the binary name) and the build matrix. The same workflow is intended
 # to be lifted into the elide repo for its binaries — extend BIN to a loop or
 # add matrix targets there.
 #
-# Tags point at commits that have already passed `ci.yml` on the PR to main, so
-# this workflow builds and ships; it does not re-run fmt/clippy/test.
+# A tag points at a commit `ci.yml` already validated on its PR to main, so this
+# workflow builds and ships.
 
 on:
   push:
@@ -52,17 +52,31 @@ jobs:
           shared-key: mint-release-${{ matrix.target }}
 
       # --locked builds against the committed Cargo.lock so the released binary
-      # is reproducible from the tagged tree.
+      # is reproducible from the tagged tree. MINT_RELEASE_VERSION carries the
+      # tag, which build.rs bakes into `mint --version` — making the tag the
+      # version's single source of truth.
       - name: Build
+        env:
+          MINT_RELEASE_VERSION: ${{ github.ref_name }}
         run: cargo build --release --locked --bin "$BIN" --target ${{ matrix.target }}
 
       - name: Smoke-test the binary
-        run: ./target/${{ matrix.target }}/release/"$BIN" --help
+        run: |
+          bin=./target/${{ matrix.target }}/release/"$BIN"
+          "$bin" --help
+          # The baked version must match the tag (minus the leading v).
+          want="${GITHUB_REF_NAME#v}"
+          got="$("$bin" --version)"
+          echo "reported: $got"
+          case "$got" in
+            *"$want"*) echo "version matches the tag" ;;
+            *) echo "::error::'$got' does not contain tag version '$want'"; exit 1 ;;
+          esac
 
-      # Name the asset by target triple (no version) so the consumer's download
-      # URL is stable across releases; the tag carries the version. The .sha256
-      # uses the asset's own name, so `sha256sum -c` passes against the file the
-      # consumer downloads under the same name.
+      # Name the asset by target triple so the consumer's download URL is stable
+      # across releases; the tag carries the version. The .sha256 uses the
+      # asset's own name, so `sha256sum -c` passes against the file the consumer
+      # downloads under the same name.
       - name: Stage artifact + checksum
         run: |
           asset="$BIN-${{ matrix.target }}"
@@ -77,8 +91,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # A semver pre-release tag carries a hyphen (v1.2.3-rc1, -alpha, …);
-          # publish those as a GitHub pre-release so they are never badged
-          # "Latest". A plain vX.Y.Z is a final release.
+          # publish those as a GitHub pre-release, keeping them off the "Latest"
+          # badge. A plain vX.Y.Z is a final release.
           extra=""
           case "$GITHUB_REF_NAME" in *-*) extra="--prerelease" ;; esac
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \

@@ -28,8 +28,12 @@ https://github.com/soulware/mint/releases/download/<tag>/mint-x86_64-unknown-lin
 - The `.sha256` is `sha256sum` format (`<hash>  mint-x86_64-unknown-linux-gnu`), so
   `sha256sum -c` works directly against the downloaded file.
 - Built with `--locked`, so the binary is reproducible from the tagged tree.
-- The release job does **not** re-run fmt/clippy/test: a tag points at a commit that
-  already passed `ci.yml` on its PR to `main`.
+- The **tag is the single source of truth for the version**: the workflow passes it as
+  `MINT_RELEASE_VERSION` and `build.rs` bakes it into `mint --version` (the smoke step
+  asserts they match), so a release is one tag push. The manifest version stays a fixed
+  `0.0.0` placeholder; local and CI builds report `0.0.0-dev`.
+- The release job builds and ships what `ci.yml` already validated on the PR to `main` (the
+  tag points at an already-green commit).
 
 The shape is deliberately generic — `env.BIN` plus the build matrix are the only
 repo-specific knobs — so the same workflow is intended to be reused for other repos' (e.g.
@@ -50,9 +54,12 @@ elide's) binaries.
 
 ## Cutting a release
 
+A release is **just a tag push** — the version is derived from the tag at build time
+(above):
+
 ```sh
-git tag -a v0.1.0 -m "mint v0.1.0"
-git push origin v0.1.0
+git tag -a v0.1.1 -m "mint v0.1.1"
+git push origin v0.1.1
 ```
 
 To dry-run the pipeline without publishing a "Latest" release, push a pre-release tag,
