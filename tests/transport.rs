@@ -74,7 +74,7 @@ async fn full_flow_over_unix_socket() {
     // K_M-B keys the attested TPC the exchange stamps onto the `writer`
     // credential, and the demo attestation authority's discharge route.
     store_inner
-        .init_k_m_b(srv_dir.path(), true)
+        .init_k_m_b(srv_dir.path(), true, None)
         .expect("init k_m_b");
     let store = Arc::new(store_inner);
     let nonce = store.current_invite().await.expect("nonce");

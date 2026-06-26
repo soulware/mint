@@ -66,6 +66,13 @@ location = "https://attest.elide.internal/v1/discharge"
 [attestation.demo]
 # Defaults to <data_dir>/attest.sock when omitted.
 socket = "mint_data/attest.sock"
+# K_M-B, the attestation TPC-CID wrapping key, as standard base64 of 32
+# bytes. Set this ONLY for the distributed demo, where mint and the
+# attestation coordinator run on separate hosts: render the same generated
+# value into both configs so the coordinator opens attestation CIDs mint
+# seals. Omit for the single-host fixture — mint then generates K_M-B on
+# first start.
+# k_m_b = "REPLACE_WITH_BASE64_32_BYTE_KEY"
 
 # Where mint keeps its own enrollment state (`_mint/*`). Operational
 # only — not a template surface.

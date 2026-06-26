@@ -634,32 +634,53 @@ impl Store {
         self.k_m_a.as_deref()
     }
 
-    /// Load or — when `demo_enabled` is true and the file is absent —
-    /// generate the K_M-B wrapping key under `<dir>/k_m_b`. Mirrors
-    /// [`init_k_m_a`](Store::init_k_m_a): called from the bootstrap path
-    /// when the config declares an attestation role or colocates the
-    /// demo attestation authority. Same on-disk shape and custody
-    /// (64 ASCII hex, mode 0600). Unlike K_M-A it does not assign
-    /// `org_id` — the org is already settled by `init_k_m_a` (the
-    /// attestation authority serves the same org).
-    pub fn init_k_m_b(&mut self, dir: &Path, demo_enabled: bool) -> io::Result<()> {
+    /// Establish the K_M-B wrapping key under `<dir>/attestation-shared.key`,
+    /// mutating `self.k_m_b`. Called from the bootstrap path when the config
+    /// declares an attestation role or colocates the demo attestation
+    /// authority. Mirrors [`init_k_m_a`](Store::init_k_m_a) and its source
+    /// precedence: `configured` (a `[attestation.demo].k_m_b` from config — the
+    /// distributed-demo shared secret, mirrored onto disk so the file tracks
+    /// the live key), else the on-disk key, else a freshly generated one when
+    /// `demo_enabled`. Same on-disk shape and custody (64 ASCII hex, mode
+    /// 0600). The org is settled by `init_k_m_a`, so this establishes only the
+    /// key.
+    pub fn init_k_m_b(
+        &mut self,
+        dir: &Path,
+        demo_enabled: bool,
+        configured: Option<[u8; 32]>,
+    ) -> io::Result<()> {
         let path = dir.join(K_M_B_FILE);
-        let bytes = match std::fs::read_to_string(&path) {
-            Ok(s) => unhex32(s.trim())
-                .ok_or_else(|| io::Error::other(format!("{path:?}: not 64 hex bytes")))?,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                if !demo_enabled {
-                    return Err(io::Error::other(format!(
-                        "K_M-B absent at {path:?}; mint requires attestation-authority \
-                         enrollment or demo mode ([auth.demo])"
-                    )));
+        let bytes = match configured {
+            // Config is authoritative; mirror it onto disk so the file is
+            // never stale. Write only when it differs (or is absent) to keep
+            // restarts idempotent.
+            Some(k) => {
+                let on_disk = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|s| unhex32(s.trim()));
+                if on_disk != Some(k) {
+                    write_key_file(&path, &hex32(&k))?;
                 }
-                let mut fresh = [0u8; 32];
-                rand_core::OsRng.fill_bytes(&mut fresh);
-                write_key_file(&path, &hex32(&fresh))?;
-                fresh
+                k
             }
-            Err(e) => return Err(e),
+            None => match std::fs::read_to_string(&path) {
+                Ok(s) => unhex32(s.trim())
+                    .ok_or_else(|| io::Error::other(format!("{path:?}: not 64 hex bytes")))?,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    if !demo_enabled {
+                        return Err(io::Error::other(format!(
+                            "K_M-B absent at {path:?}; mint requires attestation-authority \
+                             enrollment or demo mode ([auth.demo])"
+                        )));
+                    }
+                    let mut fresh = [0u8; 32];
+                    rand_core::OsRng.fill_bytes(&mut fresh);
+                    write_key_file(&path, &hex32(&fresh))?;
+                    fresh
+                }
+                Err(e) => return Err(e),
+            },
         };
         self.k_m_b = Some(Arc::new(bytes));
         Ok(())
@@ -1876,7 +1897,7 @@ mod tests {
         let mut s = Store::open_local(d.path()).await.unwrap();
         assert!(s.k_m_b().is_none(), "absent until init");
         s.init_k_m_a(d.path(), true, None).expect("init k_m_a");
-        s.init_k_m_b(d.path(), true).expect("init k_m_b");
+        s.init_k_m_b(d.path(), true, None).expect("init k_m_b");
         let k_m_a = *s.k_m_a().expect("k_m_a present");
         let k_m_b = *s.k_m_b().expect("k_m_b present");
         // Distinct keys, distinct files — never the same bytes even when
@@ -1886,7 +1907,7 @@ mod tests {
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         // Restart loads the same K_M-B bytes.
         let mut s2 = Store::open_local(d.path()).await.unwrap();
-        s2.init_k_m_b(d.path(), true).expect("init");
+        s2.init_k_m_b(d.path(), true, None).expect("init");
         assert_eq!(k_m_b, *s2.k_m_b().expect("present"));
     }
 
@@ -1894,8 +1915,54 @@ mod tests {
     async fn k_m_b_absent_without_demo_is_an_error() {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open_local(d.path()).await.unwrap();
-        let err = s.init_k_m_b(d.path(), false).expect_err("must refuse");
+        let err = s
+            .init_k_m_b(d.path(), false, None)
+            .expect_err("must refuse");
         assert!(format!("{err}").contains("K_M-B"));
+    }
+
+    #[tokio::test]
+    async fn k_m_b_from_config_is_used_and_mirrored_to_disk() {
+        // The distributed-demo shape: K_M-B comes from config (shared with the
+        // attestation coordinator). init uses it and persists it to
+        // attestation-shared.key so the on-disk file reflects the live key,
+        // mode 0600.
+        let d = tempfile::tempdir().unwrap();
+        let mut s = Store::open_local(d.path()).await.unwrap();
+        let configured = [42u8; 32];
+        s.init_k_m_b(d.path(), true, Some(configured))
+            .expect("init");
+        assert_eq!(*s.k_m_b().expect("present"), configured);
+        let path = d.path().join(K_M_B_FILE);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().trim(),
+            hex32(&configured),
+            "config-sourced K_M-B is mirrored to disk"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[tokio::test]
+    async fn k_m_b_from_config_overwrites_a_stale_disk_file() {
+        // A leftover attestation-shared.key from a prior generated run must not
+        // shadow an explicit config value — config is authoritative and the
+        // file is rewritten so it cannot drift from the live key.
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(K_M_B_FILE), hex32(&[7u8; 32])).unwrap();
+        let mut s = Store::open_local(d.path()).await.unwrap();
+        s.init_k_m_b(d.path(), true, Some([42u8; 32]))
+            .expect("init");
+        assert_eq!(*s.k_m_b().unwrap(), [42u8; 32]);
+        assert_eq!(
+            std::fs::read_to_string(d.path().join(K_M_B_FILE))
+                .unwrap()
+                .trim(),
+            hex32(&[42u8; 32]),
+            "stale on-disk key is overwritten with the config value"
+        );
     }
 
     #[tokio::test]

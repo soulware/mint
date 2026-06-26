@@ -442,7 +442,11 @@ async fn open_store(cfg: &Config) -> Result<(Store, TigrisHandles), Box<dyn std:
     // out-of-band by its attestation authority.
     let attest_demo = cfg.demo_attestation.is_some();
     if cfg.roles.values().any(|r| r.is_attested()) || attest_demo {
-        store.init_k_m_b(&cfg.data_dir, demo_enabled)?;
+        // `[attestation.demo].k_m_b`, when set, is the distributed-demo shared
+        // secret — used verbatim so mint matches the attestation coordinator's
+        // copy (mirrors the K_M-A path above).
+        let configured = cfg.demo_attestation.as_ref().and_then(|d| d.k_m_b);
+        store.init_k_m_b(&cfg.data_dir, demo_enabled, configured)?;
     }
     Ok((
         store,
