@@ -6,7 +6,10 @@ resolver = "2"
 
 [package]
 name = "mint"
-version = "0.1.0"
+# The release version is the git tag, baked into `mint --version` by build.rs
+# (passed as MINT_RELEASE_VERSION); this placeholder serves local and CI builds.
+# See docs/release-artifacts.md.
+version = "0.0.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Macaroon-authenticated scoped-credential vending for Tigris (prototype)."

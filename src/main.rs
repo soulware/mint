@@ -24,7 +24,10 @@ use mint::state::{KeyProvisioning, Store};
 use mint::tigris::TigrisMinter;
 
 #[derive(Parser)]
-#[command(about = "mint: macaroon-authenticated scoped-credential vending for Tigris")]
+#[command(
+    version = env!("MINT_VERSION"),
+    about = "mint: macaroon-authenticated scoped-credential vending for Tigris"
+)]
 struct Args {
     #[command(subcommand)]
     command: Command,
