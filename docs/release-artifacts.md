@@ -74,30 +74,21 @@ git tag -d v0.1.0-rc1
 
 ## Consuming the artifact in a deployment
 
-1. **Download** the binary (and, for transit integrity, the `.sha256`) from the release
-   URL for your pinned `<tag>`.
-2. **Verify the checksum.** Two postures:
-   - *Fetch-and-check* — download the `.sha256` and `sha256sum -c` it. Guards against
-     transit corruption only.
-   - *Pinned digest* (**recommended for deploys**) — store the expected SHA-256 in your
-     deploy repo and check against it: `echo "<sha256>  <asset>" | sha256sum -c -`. The
-     fetched `.sha256` lives in the same release as the binary, so an actor who can replace
-     the binary can replace its checksum too; a digest pinned in your own repo can't be
-     swapped that way. Each version bump then updates the tag *and* the digest together.
-3. **Mind the glibc base** (above) — keep the runtime on a glibc distro ≥ the builder's.
-4. **Render with the same binary if needed.** If the deployment renders role templates
+1. **Download** the binary from the release URL for your pinned `<tag>`. The tag in the URL
+   is the pin and HTTPS covers transit integrity, so a deploy moves a single value — the
+   tag. For an optional transit-corruption guard, fetch the `.sha256` alongside and
+   `sha256sum -c` it.
+2. **Mind the glibc base** (above) — keep the runtime on a glibc distro ≥ the builder's.
+3. **Render with the same binary if needed.** If the deployment renders role templates
    (`mint render` bakes `{{build.X}}` deployment constants), it already has the binary in
    hand — render before assembling the runtime image.
-
-The v0.1.0 binary's sha256 is
-`e54f14be734d10b30191cfc6f3eda73f22ee399d23a05005eea90df6433ee1ca`.
 
 ## Worked example: elide's Fly image
 
 elide's `deploy/mint/` (in the elide repo — land the change there) builds the Fly image.
 It currently compiles mint from source: rustup + `build-essential`, `git clone` at a pinned
 commit SHA (`MINT_REF`), `cargo build --release` — minutes per `fly deploy`. Switching to
-the artifact replaces that with a download + verify, keeping the `mint render` step.
+the artifact replaces that with a download, keeping the `mint render` step.
 
 **`deploy/mint/Dockerfile`** — rename the build arg `MINT_REF` (SHA) → `MINT_VERSION`
 (tag), and replace the build stage's toolchain/clone/compile with a download. The build
@@ -116,11 +107,8 @@ RUN apt-get update \
 
 ARG MINT_ASSET=mint-x86_64-unknown-linux-gnu
 ARG MINT_BASE=https://github.com/soulware/mint/releases/download
-# Pinned-digest verify (preferred). For the fetch-and-check form, curl the
-# "${MINT_ASSET}.sha256" alongside and `sha256sum -c "${MINT_ASSET}.sha256"`.
-ARG MINT_SHA256=e54f14be734d10b30191cfc6f3eda73f22ee399d23a05005eea90df6433ee1ca
+# The MINT_VERSION tag is the pin; HTTPS covers the transfer.
 RUN curl --proto '=https' --tlsv1.2 -fsSLO "${MINT_BASE}/${MINT_VERSION}/${MINT_ASSET}" \
- && echo "${MINT_SHA256}  ${MINT_ASSET}" | sha256sum -c - \
  && install -m 0755 "${MINT_ASSET}" /usr/local/bin/mint
 
 ARG DATA_BUCKET=elide
@@ -140,15 +128,14 @@ sed, `MINT_CONFIG`, `EXPOSE`, `CMD`) is unchanged. Update the Dockerfile header 
 — it currently claims "mint publishes no release artifact," which is no longer true.
 
 **`deploy/mint/fly.toml.example`** — under `[build.args]`, replace `MINT_REF = "<sha>"`
-with `MINT_VERSION = "v0.1.0"` (and `MINT_SHA256` if pinning the digest), and update the
-surrounding comment.
+with `MINT_VERSION = "v0.1.0"`, the single per-deploy knob (overridable per deploy with
+`fly deploy --build-arg MINT_VERSION=vX.Y.Z`), and update the surrounding comment.
 
 **`deploy/mint/README.md`** — reword the prose that says the image "builds the stock `mint`
-from the pinned `MINT_REF`" to "downloads and checksum-verifies the released `mint` binary
-at `MINT_VERSION`"; change the build-args bullet `MINT_REF (lockstep mint commit)` →
-`MINT_VERSION (released mint tag, e.g. v0.1.0)`. Keep the role-templates "lockstep with the
-coordinator" framing — that's about the templates, independent of how the binary is
-obtained.
+from the pinned `MINT_REF`" to "downloads the released `mint` binary at `MINT_VERSION`";
+change the build-args bullet `MINT_REF (lockstep mint commit)` → `MINT_VERSION (released
+mint tag, e.g. v0.1.0)`. Keep the role-templates "lockstep with the coordinator" framing —
+that's about the templates, independent of how the binary is obtained.
 
 **Out of scope.** The `attested-e2e` CI job uses the **`mint-e2e` harness binary**, built
 from source with `--features e2e-harness`. That harness is *not* a published artifact (the
