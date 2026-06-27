@@ -2,7 +2,8 @@ name: release
 
 # Build the `mint` release binary and publish it as a GitHub Release asset on a
 # `v*` tag push. Downstream deployments (e.g. elide's deploy/mint image) pull
-# this prebuilt artifact and verify its checksum.
+# this prebuilt artifact at a pinned tag; the published .sha256 backs an optional
+# transit-corruption check.
 #
 # This is a deliberately generic, copy-able shape: the only repo-specific bits
 # are BIN (the binary name) and the build matrix. The same workflow is intended
