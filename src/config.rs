@@ -105,6 +105,24 @@ pub enum ConfigError {
          [[role]] — a profile may only grant roles this mint defines"
     )]
     ProfileUnknownRole { profile: String, role: String },
+    #[error("read catalog_file {path:?}: {source}")]
+    ReadCatalogFile {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("parse catalog_file {path:?}: {source}")]
+    ParseCatalog {
+        path: String,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error(
+        "catalog_file is set, so the [[role]] and [[profile]] catalog must live \
+         in that file — remove them from the main config (the two are mutually \
+         exclusive)"
+    )]
+    CatalogAndInline,
 }
 
 /// Normalise a declared field set (`attested`/`caveat`) to a canonical sorted,
@@ -209,11 +227,31 @@ pub struct RawConfig {
     /// colocation of the attestation authority. Absent ⟹ no attestation.
     #[serde(default)]
     pub attestation: Option<RawAttestation>,
+    /// Path to a separate catalog file holding the `[[role]]` +
+    /// `[[profile]]` entries, keeping the operational config (store, auth,
+    /// listener, …) apart from the authorization catalog. When set, the
+    /// catalog comes from that file and inline `[[role]]`/`[[profile]]` in
+    /// the main config are rejected. Same resolution rule as `roles_dir`
+    /// (relative against the cwd, absolute verbatim). Absent ⟹ the catalog
+    /// is read inline from this config.
+    #[serde(default)]
+    pub catalog_file: Option<String>,
     #[serde(rename = "role", default)]
     pub roles: Vec<RawRole>,
     /// The `[[profile]]` catalog — a sibling to `[[role]]`. Each entry
     /// names an enrollment *profile* and the role set it grants. Required
     /// and non-empty — see [`ConfigError::NoProfiles`].
+    #[serde(rename = "profile", default)]
+    pub profiles: Vec<RawProfile>,
+}
+
+/// A separate `[[role]]` + `[[profile]]` catalog file, referenced by
+/// `catalog_file`. Same shape as the inline catalog in [`RawConfig`] —
+/// the authorization surface, kept apart from operational config.
+#[derive(Debug, Deserialize)]
+pub struct RawCatalog {
+    #[serde(rename = "role", default)]
+    pub roles: Vec<RawRole>,
     #[serde(rename = "profile", default)]
     pub profiles: Vec<RawProfile>,
 }
@@ -629,8 +667,30 @@ impl Config {
             Some(a) => (a.location, a.demo),
             None => (None, None),
         };
+        // The role + profile catalog comes from `catalog_file` when set,
+        // else inline from the main config. The two are mutually exclusive
+        // — a catalog_file with inline entries is an authoring mistake, so
+        // reject it rather than silently picking one. The file resolves
+        // cwd-relative (or absolute), the same rule as `roles_dir`.
+        let (raw_roles, raw_profiles) = match raw.catalog_file {
+            Some(path) => {
+                if !raw.roles.is_empty() || !raw.profiles.is_empty() {
+                    return Err(ConfigError::CatalogAndInline);
+                }
+                let text = std::fs::read_to_string(&path).map_err(|source| {
+                    ConfigError::ReadCatalogFile {
+                        path: path.clone(),
+                        source,
+                    }
+                })?;
+                let catalog: RawCatalog = toml::from_str(&text)
+                    .map_err(|source| ConfigError::ParseCatalog { path, source })?;
+                (catalog.roles, catalog.profiles)
+            }
+            None => (raw.roles, raw.profiles),
+        };
         let mut roles = BTreeMap::new();
-        for r in raw.roles {
+        for r in raw_roles {
             if r.ttl_seconds == 0 {
                 return Err(ConfigError::ZeroTtl {
                     role: r.name.clone(),
@@ -682,11 +742,11 @@ impl Config {
         // roles, so a typo can't widen a grant to a role that doesn't
         // exist. Resolved into a `name → roles` map keyed for the
         // exchange-time lookup.
-        if raw.profiles.is_empty() {
+        if raw_profiles.is_empty() {
             return Err(ConfigError::NoProfiles);
         }
         let mut profiles = BTreeMap::new();
-        for p in raw.profiles {
+        for p in raw_profiles {
             if p.roles.is_empty() {
                 return Err(ConfigError::EmptyProfile { profile: p.name });
             }
@@ -1006,6 +1066,52 @@ roles = ["volume-ro"]
             parse_for_test(&toml, &[("volume-ro.json", "{}")]),
             Err(ConfigError::ProfileUnknownRole { profile, role })
                 if profile == "client" && role == "ghost"
+        ));
+    }
+
+    #[test]
+    fn catalog_file_supplies_roles_and_profiles() {
+        // With `catalog_file` set, the [[role]] + [[profile]] catalog
+        // lives in that file; the main config carries only operational
+        // keys. The resolved roles/profiles are identical to the inline
+        // form.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("volume-ro.json"), "{}").expect("policy");
+        let catalog = dir.path().join("catalog.toml");
+        std::fs::write(
+            &catalog,
+            r#"
+[[role]]
+name = "volume-ro"
+ttl_seconds = 100
+policy_file = "volume-ro.json"
+
+[[profile]]
+name = "client"
+roles = ["volume-ro"]
+"#,
+        )
+        .expect("catalog");
+        let toml = format!(
+            "audience = \"mint\"\nroles_dir = {:?}\ncatalog_file = {:?}\n[store]\nbucket = \"b\"\n",
+            dir.path().display().to_string(),
+            catalog.display().to_string(),
+        );
+        let c = Config::from_toml_str(&toml).expect("loads catalog");
+        assert_eq!(c.roles["volume-ro"].ttl_seconds, 100);
+        assert_eq!(c.profiles["client"], vec!["volume-ro".to_string()]);
+    }
+
+    #[test]
+    fn rejects_catalog_file_with_inline_catalog() {
+        // catalog_file and inline [[role]]/[[profile]] are mutually
+        // exclusive — the inline check fires before the file is read, so
+        // a bogus path still surfaces the authoring mistake.
+        let toml = "audience = \"mint\"\ncatalog_file = \"nope.toml\"\n[store]\nbucket = \"b\"\n\
+                    [[role]]\nname = \"r\"\nttl_seconds = 100\n";
+        assert!(matches!(
+            Config::from_toml_str(toml),
+            Err(ConfigError::CatalogAndInline)
         ));
     }
 

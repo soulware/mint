@@ -13,8 +13,11 @@ This is mint's side of the cross-repo contract in
 
 ## The mapping is config-owned, the profile is client-declared
 
-Profiles are declared in `mint.toml` as top-level `[[profile]]` entries — a
-sibling catalog to `[[role]]` — each a `name` and the `roles` it grants:
+Profiles are declared as top-level `[[profile]]` entries — a sibling catalog
+to `[[role]]` — each a `name` and the `roles` it grants. The catalog
+(`[[role]]` + `[[profile]]`) lives inline in `mint.toml`, or in a separate
+file referenced by `catalog_file` (the operational config then carries only
+`store`/`auth`/listener):
 
 ```toml
 [[profile]]

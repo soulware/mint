@@ -62,7 +62,9 @@ Initial configuration, admin key management and running the mint server -
 cp examples/mint-demo.toml ./mint-demo.toml   # then edit store.bucket to a bucket you own
 export MINT_CONFIG=./mint-demo.toml
 
-# Note: mint-demo.toml defines 2 roles and references the following templates by default -
+# Note: mint-demo.toml points at a separate role+profile catalog
+# (examples/mint-demo-catalog.toml) which defines 2 roles, referencing
+# these templates by default -
 # * ./examples/demo_roles/demo.json
 # * ./examples/demo_roles/demo-attested.json
 

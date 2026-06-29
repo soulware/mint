@@ -27,6 +27,11 @@ roles_dir = "examples/demo_roles"
 # Each role's template defaults to <roles_dir>/<name>.json (demo ->
 # examples/demo_roles/demo.json); set policy_file only to override.
 
+# The [[role]] + [[profile]] catalog lives in its own file, referenced
+# here (same cwd-relative resolution as roles_dir). Keeps this file to
+# operational config; the catalog is the authorization surface.
+catalog_file = "examples/mint-demo-catalog.toml"
+
 # Lifetime (seconds) of the credential ticket a client gets at enroll and
 # presents at exchange. Multi-use within this window; defaults to 86400
 # (24h). Must be > 0.
@@ -81,57 +86,6 @@ bucket = "mint-demo"
 # endpoint = "https://t3.storage.dev"   # default; set for non-Tigris S3
 # region   = "us-east-1"                # default
 
-# A policy template pulls from two namespaces — `{{caveat.X}}` (MAC-verified)
-# and `{{mint.X}}` (mint-computed) — plus literal text for true deployment
-# constants. A `{{caveat.X}}` value reaches the credential by one of two
-# provenances, derived from the name:
-#   - issuer-stamped — a reserved name (e.g. `sub`) mint sets from the
-#                      principal.
-#   - attested       — any other name: the caller proposes it at exchange
-#                      (`--caveat X=V`) and the attestation authority vouches
-#                      it before it bakes in.
-# The two roles below cover both. Each role's `ttl_seconds` is the credential
-# lifetime in seconds, clamped to the `exp` the caller attenuated onto its
-# credential — a caller can ask for less, never more.
-
-# `demo` — issuer-only. Its template binds only the reserved, issuer-stamped
-# `sub`, so it needs no attestation authority and exchanges in one step. The
-# credential is scoped to the caller's own `sub` prefix in a fixed (literal)
-# bucket.
-#   mint client exchange demo
-[[role]]
-name = "demo"
-ttl_seconds = 900
-
-# `demo-attested` — attested. Its template binds the non-reserved `bucket`
-# and `project`; the caller proposes both at exchange and the attestation
-# authority vouches them before they bake into the credential. Any
-# non-reserved caveat makes a role attested, and an attested role exchanges
-# via a durable (no-`exp`) intermediate the holder finalizes per-use — e.g. a
-# coordinator minting a credential per volume.
-#   mint client exchange demo-attested --caveat bucket=demo-bucket --caveat project=apollo
-[[role]]
-name = "demo-attested"
-ttl_seconds = 300
-
-# Enrollment profiles (docs/enroll-profiles.md). A profile is a sibling of
-# [[role]] above: a named bundle of roles. An enrollee declares one at
-# `mint client enroll --profile <name>`; mint maps it to the role set that
-# enrollment may exchange, and the operator ratifies the profile at
-# `mint enroll approve`. The profile name space is the deployment's own —
-# mint coins none. Required and fail-closed: an enrollee whose `profile` is
-# absent or not listed here is refused at enroll, and `enroll-exchange`
-# refuses any role outside the granted set. At least one profile must be
-# declared.
-
-# A full client may exchange either demo role.
-[[profile]]
-name = "client"
-roles = ["demo", "demo-attested"]
-
-# A read-only enrollee (e.g. a dedicated attestation authority) is held to
-# the issuer-only role and can never exchange the attested one — the grant
-# is mint-enforced, not convention.
-[[profile]]
-name = "readonly"
-roles = ["demo"]
+# The role + profile catalog lives in a separate file (see catalog_file
+# above), keeping this operational config apart from the authorization
+# surface. See examples/mint-demo-catalog.toml.
