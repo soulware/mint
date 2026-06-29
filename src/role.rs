@@ -142,6 +142,10 @@ bucket = "b"
 name = "volume-ro"
 ttl_seconds = 1000
 policy_file = "volume-ro.json"
+
+[[profile]]
+name = "client"
+roles = ["volume-ro"]
 "#,
             &[("volume-ro.json", "{}")],
         )
@@ -282,6 +286,10 @@ bucket = "b"
 name = "volume-ro"
 ttl_seconds = {ttl}
 policy_file = "volume-ro.json"
+
+[[profile]]
+name = "client"
+roles = ["volume-ro"]
 "#
         );
         let cfg = crate::config::parse_for_test(&toml, &[("volume-ro.json", "{}")]).expect("cfg");

@@ -41,6 +41,10 @@ location = "https://attest.example/v1/discharge"
 name = "writer"
 ttl_seconds = 900
 policy_file = "writer.json"
+
+[[profile]]
+name = "client"
+roles = ["writer"]
 "#;
 
 fn config() -> Config {
@@ -161,6 +165,7 @@ async fn full_flow_over_unix_socket() {
         &url,
         &invite,
         SUB,
+        "client",
         mint::client::CREDENTIAL_TICKET_FILE,
     )
     .await
@@ -194,7 +199,7 @@ async fn full_flow_over_unix_socket() {
     let (cnf, _fp) = mint::client::identity(cdir.path()).expect("client identity");
     let now_iso = chrono::Utc::now().to_rfc3339();
     store
-        .approve(SUB, &cnf, "usr_op", &now_iso)
+        .approve(SUB, &cnf, "client", "usr_op", &now_iso)
         .await
         .expect("approve");
     assert!(

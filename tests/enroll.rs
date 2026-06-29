@@ -60,6 +60,14 @@ policy_file = "volume-ro.json"
 name = "volume-rw"
 ttl_seconds = 900
 policy_file = "volume-rw.json"
+
+[[profile]]
+name = "full"
+roles = ["volume-ro", "volume-rw"]
+
+[[profile]]
+name = "readonly"
+roles = ["volume-ro"]
 "#;
 
 const VOLUME_RW_POLICY: &str = r#"{"Version":"2012-10-17","Statement":[]}"#;
@@ -275,7 +283,12 @@ async fn full_flow_enroll_approve_exchange_then_assume_role() {
     // (1) enroll → pending + ticket
     let (status, body) = parts(
         app.clone()
-            .oneshot(signed("/v1/enroll", &cb, &CLIENT_SEED, ""))
+            .oneshot(signed(
+                "/v1/enroll",
+                &cb,
+                &CLIENT_SEED,
+                r#","profile":"full""#,
+            ))
             .await
             .unwrap(),
     )
@@ -304,6 +317,7 @@ async fn full_flow_enroll_approve_exchange_then_assume_role() {
         .approve(
             SUB,
             &pop::cnf_value(&SigningKey::from_bytes(&CLIENT_SEED)),
+            "full",
             "usr_op",
             &now_iso(),
         )
@@ -403,7 +417,10 @@ async fn full_flow_enroll_approve_exchange_then_assume_role() {
         Resolved::Value("volume-rw".into())
     );
 
-    // floor gate: a role not in the mint config is the same opaque 401.
+    // grant gate: a role no configured profile grants — here `nope` — is the
+    // hard 422, ahead of any sealed-role floor check
+    // (`docs/enroll-profiles.md`). The grant check leaks no role-existence
+    // signal: every ungranted role, known or not, is the same 422.
     let (status, _) = parts(
         app.clone()
             .oneshot(signed(
@@ -416,7 +433,7 @@ async fn full_flow_enroll_approve_exchange_then_assume_role() {
             .unwrap(),
     )
     .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 
     // (5) attenuate the credential and assume a role with it. The
     // credential is a bare primary — the attested volume was baked in at
@@ -486,7 +503,12 @@ async fn re_enroll_after_keyring_rotation_lazily_migrates_approval() {
     // (1) initial enroll + operator approval under kid=0
     let (status, _) = parts(
         app.clone()
-            .oneshot(signed("/v1/enroll", &cb, &CLIENT_SEED, ""))
+            .oneshot(signed(
+                "/v1/enroll",
+                &cb,
+                &CLIENT_SEED,
+                r#","profile":"full""#,
+            ))
             .await
             .unwrap(),
     )
@@ -496,6 +518,7 @@ async fn re_enroll_after_keyring_rotation_lazily_migrates_approval() {
         .approve(
             SUB,
             &pop::cnf_value(&SigningKey::from_bytes(&CLIENT_SEED)),
+            "full",
             "usr_op",
             &now_iso(),
         )
@@ -528,7 +551,12 @@ async fn re_enroll_after_keyring_rotation_lazily_migrates_approval() {
     // (same sub/cnf) and the handler opportunistically re-MACs.
     let (status, _) = parts(
         app.clone()
-            .oneshot(signed("/v1/enroll", &cb, &CLIENT_SEED, ""))
+            .oneshot(signed(
+                "/v1/enroll",
+                &cb,
+                &CLIENT_SEED,
+                r#","profile":"full""#,
+            ))
             .await
             .unwrap(),
     )
@@ -558,7 +586,12 @@ async fn idempotent_reenroll_same_pair() {
     for _ in 0..2 {
         let (status, _) = parts(
             app.clone()
-                .oneshot(signed("/v1/enroll", &cb, &CLIENT_SEED, ""))
+                .oneshot(signed(
+                    "/v1/enroll",
+                    &cb,
+                    &CLIENT_SEED,
+                    r#","profile":"full""#,
+                ))
                 .await
                 .unwrap(),
         )
@@ -577,7 +610,7 @@ async fn conflicting_key_for_same_sub_is_opaque_401() {
                 "/v1/enroll",
                 &client_invite(&nonce, &CLIENT_SEED),
                 &CLIENT_SEED,
-                "",
+                r#","profile":"full""#,
             ))
             .await
             .unwrap(),
@@ -590,7 +623,7 @@ async fn conflicting_key_for_same_sub_is_opaque_401() {
             "/v1/enroll",
             &client_invite(&nonce, &OTHER_SEED),
             &OTHER_SEED,
-            "",
+            r#","profile":"full""#,
         ))
         .await
         .unwrap(),
@@ -648,7 +681,7 @@ async fn re_enroll_over_legacy_unsigned_approved_takes_slow_path() {
             "/v1/enroll",
             &client_invite(&nonce, &CLIENT_SEED),
             &CLIENT_SEED,
-            "",
+            r#","profile":"full""#,
         ))
         .await
         .unwrap(),
@@ -677,9 +710,14 @@ async fn stale_invite_nonce_is_opaque_401() {
     let cb = client_invite(&stale, &CLIENT_SEED);
     store.rotate_invite().await.unwrap(); // current nonce moves on
     let (status, _) = parts(
-        app.oneshot(signed("/v1/enroll", &cb, &CLIENT_SEED, ""))
-            .await
-            .unwrap(),
+        app.oneshot(signed(
+            "/v1/enroll",
+            &cb,
+            &CLIENT_SEED,
+            r#","profile":"full""#,
+        ))
+        .await
+        .unwrap(),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -692,9 +730,14 @@ async fn enroll_pop_by_wrong_key_is_opaque_401() {
     // cnf bound to CLIENT_SEED, but the request is signed by OTHER_SEED.
     let cb = client_invite(&nonce, &CLIENT_SEED);
     let (status, _) = parts(
-        app.oneshot(signed("/v1/enroll", &cb, &OTHER_SEED, ""))
-            .await
-            .unwrap(),
+        app.oneshot(signed(
+            "/v1/enroll",
+            &cb,
+            &OTHER_SEED,
+            r#","profile":"full""#,
+        ))
+        .await
+        .unwrap(),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -741,7 +784,12 @@ async fn gates_carry_tpc_but_credential_does_not() {
     // enroll → ticket, which carries its own (exchange-gate) TPC.
     let (status, body) = parts(
         app.clone()
-            .oneshot(signed("/v1/enroll", &cb, &CLIENT_SEED, ""))
+            .oneshot(signed(
+                "/v1/enroll",
+                &cb,
+                &CLIENT_SEED,
+                r#","profile":"full""#,
+            ))
             .await
             .unwrap(),
     )
@@ -761,6 +809,7 @@ async fn gates_carry_tpc_but_credential_does_not() {
         .approve(
             SUB,
             &pop::cnf_value(&SigningKey::from_bytes(&CLIENT_SEED)),
+            "full",
             "usr_op",
             &now_iso(),
         )
@@ -957,7 +1006,12 @@ async fn volume_ro_intermediate(app: &axum::Router, store: &Store) -> Macaroon {
     let cb = client_invite(&nonce, &CLIENT_SEED);
     let (status, body) = parts(
         app.clone()
-            .oneshot(signed("/v1/enroll", &cb, &CLIENT_SEED, ""))
+            .oneshot(signed(
+                "/v1/enroll",
+                &cb,
+                &CLIENT_SEED,
+                r#","profile":"full""#,
+            ))
             .await
             .unwrap(),
     )
@@ -968,6 +1022,7 @@ async fn volume_ro_intermediate(app: &axum::Router, store: &Store) -> Macaroon {
         .approve(
             SUB,
             &pop::cnf_value(&SigningKey::from_bytes(&CLIENT_SEED)),
+            "full",
             "usr_op",
             &now_iso(),
         )
@@ -1080,5 +1135,117 @@ async fn durable_intermediate_is_not_usable_at_assume_role() {
         status,
         StatusCode::UNAUTHORIZED,
         "an exchange-finalize intermediate cannot be assumed directly"
+    );
+}
+
+/// `profile` is required and fail-closed: an enroll body that omits it is a
+/// `400`, never silently defaulted to a wider grant
+/// (`docs/enroll-profiles.md`). The auth gates have already cleared at this
+/// point, so this is a request-shape `400`, not an opaque `401`.
+#[tokio::test]
+async fn enroll_without_profile_is_400() {
+    let (app, _a, store, _dir) = app().await;
+    let nonce = store.current_invite().await.unwrap();
+    let cb = client_invite(&nonce, &CLIENT_SEED);
+    let (status, _) = parts(
+        app.oneshot(signed("/v1/enroll", &cb, &CLIENT_SEED, ""))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// A profile the mint does not configure is refused the same way an absent
+/// one is — mint owns the profile → grant map, so an enrollee cannot invent
+/// a privilege class by naming one.
+#[tokio::test]
+async fn enroll_with_unknown_profile_is_400() {
+    let (app, _a, store, _dir) = app().await;
+    let nonce = store.current_invite().await.unwrap();
+    let cb = client_invite(&nonce, &CLIENT_SEED);
+    let (status, _) = parts(
+        app.oneshot(signed(
+            "/v1/enroll",
+            &cb,
+            &CLIENT_SEED,
+            r#","profile":"bogus""#,
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// A `readonly` enrollment grants `volume-ro` only; the granted role
+/// exchanges fine, but asking to exchange `volume-rw` is refused with
+/// `422` — the structural backstop that keeps a read-only enrollment from
+/// reaching a writing role even if its client asks
+/// (`docs/enroll-profiles.md`). `422` is outside the `{200, 401, 403}` the
+/// exchange client interprets, so a client past its grant fails loudly.
+#[tokio::test]
+async fn exchange_role_outside_grant_is_422() {
+    let (app, _audit, store, _dir) = app().await;
+    let nonce = store.current_invite().await.unwrap();
+    let cb = client_invite(&nonce, &CLIENT_SEED);
+
+    let (status, body) = parts(
+        app.clone()
+            .oneshot(signed(
+                "/v1/enroll",
+                &cb,
+                &CLIENT_SEED,
+                r#","profile":"readonly""#,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let ticket = field(&body, "credential.ticket");
+
+    store
+        .approve(
+            SUB,
+            &pop::cnf_value(&SigningKey::from_bytes(&CLIENT_SEED)),
+            "readonly",
+            "usr_op",
+            &now_iso(),
+        )
+        .await
+        .unwrap();
+
+    // The granted role exchanges (an attested role → intermediate).
+    let (status, _) = parts(
+        app.clone()
+            .oneshot(signed(
+                "/v1/enroll-exchange",
+                &ticket,
+                &CLIENT_SEED,
+                r#","role":"volume-ro""#,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "granted role exchanges");
+
+    // The ungranted writing role is refused before any role/seal logic.
+    let (status, body) = parts(
+        app.oneshot(signed(
+            "/v1/enroll-exchange",
+            &ticket,
+            &CLIENT_SEED,
+            r#","role":"volume-rw""#,
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "ungranted role refused with 422: {body}"
     );
 }

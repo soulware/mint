@@ -133,6 +133,12 @@ enum ClientCmd {
         /// (`[A-Za-z0-9._-]`, ≤256 chars); not required to be a ULID.
         #[arg(value_name = "ID")]
         id: String,
+        /// Enrollment profile — the privilege class to enrol as. mint maps
+        /// it to the role set this enrollment may exchange; the operator
+        /// ratifies it at `enroll approve`. Must be a profile the target
+        /// mint configures (a `[[profile]]` entry).
+        #[arg(long)]
+        profile: String,
         /// Filename (under the client dir) to write the credential
         /// ticket to.
         #[arg(long, default_value_t = mint::client::CREDENTIAL_TICKET_FILE.to_string())]
@@ -310,10 +316,11 @@ async fn client_cmd(
             socket,
             invite,
             id,
+            profile,
             out,
         } => {
             let transport = client_transport(socket)?;
-            mint::client::enroll(&dir, &transport, &invite, &id, &out).await?;
+            mint::client::enroll(&dir, &transport, &invite, &id, &profile, &out).await?;
             eprintln!("  (compare the fingerprint out of band before approving)");
             Ok(())
         }
@@ -631,14 +638,19 @@ async fn enroll_list(config: &Path) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     println!(
-        "{:<28} {:<9} {:<18} {:<16} {:>7} FLAGS",
-        "SUB", "STATE", "FINGERPRINT", "PEER", "AGE(s)"
+        "{:<28} {:<9} {:<14} {:<18} {:<16} {:>7} FLAGS",
+        "SUB", "STATE", "PROFILE", "FINGERPRINT", "PEER", "AGE(s)"
     );
     for r in rows {
         println!(
-            "{:<28} {:<9} {:<18} {:<16} {:>7} {}",
+            "{:<28} {:<9} {:<14} {:<18} {:<16} {:>7} {}",
             r.sub,
             r.state,
+            if r.profile.is_empty() {
+                "-"
+            } else {
+                &r.profile
+            },
             if r.fingerprint.is_empty() {
                 "-"
             } else {
@@ -673,6 +685,7 @@ async fn enroll_approve(
 
     eprintln!("pending enrollment:");
     eprintln!("  sub:         {sub}");
+    eprintln!("  profile:        {}", pending.profile);
     eprintln!("  fingerprint: {}", pending.fingerprint);
     eprintln!(
         "  peer:        {}",
@@ -682,8 +695,11 @@ async fn enroll_approve(
 
     if !yes {
         eprint!(
-            "Approve? This authorises the binding — the fingerprint must \
-             match what the client reports (`mint client fingerprint`). [y/N] "
+            "Approve? This authorises the binding at the {:?} profile — the \
+             fingerprint must match what the client reports \
+             (`mint client fingerprint`), and the profile is the privilege \
+             class this enrollment may exchange. [y/N] ",
+            pending.profile
         );
         std::io::stderr().flush()?;
         let mut line = String::new();
@@ -697,6 +713,7 @@ async fn enroll_approve(
     let req = mint::admin::ApproveRequest {
         sub: sub.to_owned(),
         pubkey: pending.pubkey,
+        profile: pending.profile,
     };
     let resp =
         mint::admin::approve_enrollment(admin_target(&config), &op, &discharge, &req).await?;

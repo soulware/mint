@@ -28,6 +28,10 @@ bucket = "demo-bucket"
 name = "volume-ro"
 ttl_seconds = 2592000
 policy_file = "volume-ro.json"
+
+[[profile]]
+name = "client"
+roles = ["volume-ro"]
 "#;
 
 const POLICY: &str = r#"{"Version":"2012-10-17","Statement":[]}"#;

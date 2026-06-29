@@ -62,7 +62,9 @@ Initial configuration, admin key management and running the mint server -
 cp examples/mint-demo.toml ./mint-demo.toml   # then edit store.bucket to a bucket you own
 export MINT_CONFIG=./mint-demo.toml
 
-# Note: mint-demo.toml defines 2 roles and references the following templates by default -
+# Note: mint-demo.toml points at a separate role+profile catalog
+# (examples/mint-demo-catalog.toml) which defines 2 roles, referencing
+# these templates by default -
 # * ./examples/demo_roles/demo.json
 # * ./examples/demo_roles/demo-attested.json
 
@@ -97,10 +99,15 @@ export MINT_CONFIG=./mint-demo.toml
 The mint cli includes a demonstration `client` sub-cmd to allow the enrollment flow to be exercised.
 
 ```bash
-# Client begins the enrollment process, providing the <INVITE> from earlier -
-./target/debug/mint client enroll demo-client <INVITE>
+# Client begins the enrollment process, providing the <INVITE> from earlier.
+# `--profile` declares the privilege class to enrol as; mint maps it to the role
+# set this enrollment may exchange (see the `[[profile]]` entries in the config, and
+# docs/enroll-profiles.md). The demo config defines a `client` profile that grants
+# both demo roles -
+./target/debug/mint client enroll --profile client demo-client <INVITE>
 
-# The operator can then approve the enrollment request -
+# The operator can then approve the enrollment request. `enroll list` shows the
+# declared profile alongside the fingerprint, and `approve` ratifies it -
 ./target/debug/mint enroll list
 ./target/debug/mint enroll approve demo-client
 

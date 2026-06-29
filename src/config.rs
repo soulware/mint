@@ -89,6 +89,40 @@ pub enum ConfigError {
          mint-computed value"
     )]
     UnknownMintKey { role: String, key: String },
+    #[error(
+        "no [[profile]] configured — every deployment must declare at least one \
+         enrollment profile (a name mapped to the role set it grants); an enrollee \
+         declares its profile at /v1/enroll and mint enforces role ∈ grant at \
+         /v1/enroll-exchange"
+    )]
+    NoProfiles,
+    #[error("duplicate profile name: {0}")]
+    DuplicateProfile(String),
+    #[error("profile {profile:?}: grants no roles — a profile must grant at least one role")]
+    EmptyProfile { profile: String },
+    #[error(
+        "profile {profile:?}: grants role {role:?}, which is not a configured \
+         [[role]] — a profile may only grant roles this mint defines"
+    )]
+    ProfileUnknownRole { profile: String, role: String },
+    #[error("read catalog_file {path:?}: {source}")]
+    ReadCatalogFile {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("parse catalog_file {path:?}: {source}")]
+    ParseCatalog {
+        path: String,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error(
+        "catalog_file is set, so the [[role]] and [[profile]] catalog must live \
+         in that file — remove them from the main config (the two are mutually \
+         exclusive)"
+    )]
+    CatalogAndInline,
 }
 
 /// Normalise a declared field set (`attested`/`caveat`) to a canonical sorted,
@@ -193,8 +227,48 @@ pub struct RawConfig {
     /// colocation of the attestation authority. Absent ⟹ no attestation.
     #[serde(default)]
     pub attestation: Option<RawAttestation>,
+    /// Path to a separate catalog file holding the `[[role]]` +
+    /// `[[profile]]` entries, keeping the operational config (store, auth,
+    /// listener, …) apart from the authorization catalog. When set, the
+    /// catalog comes from that file and inline `[[role]]`/`[[profile]]` in
+    /// the main config are rejected. Same resolution rule as `roles_dir`
+    /// (relative against the cwd, absolute verbatim). Absent ⟹ the catalog
+    /// is read inline from this config.
+    #[serde(default)]
+    pub catalog_file: Option<String>,
     #[serde(rename = "role", default)]
     pub roles: Vec<RawRole>,
+    /// The `[[profile]]` catalog — a sibling to `[[role]]`. Each entry
+    /// names an enrollment *profile* and the role set it grants. Required
+    /// and non-empty — see [`ConfigError::NoProfiles`].
+    #[serde(rename = "profile", default)]
+    pub profiles: Vec<RawProfile>,
+}
+
+/// A separate `[[role]]` + `[[profile]]` catalog file, referenced by
+/// `catalog_file`. Same shape as the inline catalog in [`RawConfig`] —
+/// the authorization surface, kept apart from operational config.
+#[derive(Debug, Deserialize)]
+pub struct RawCatalog {
+    #[serde(rename = "role", default)]
+    pub roles: Vec<RawRole>,
+    #[serde(rename = "profile", default)]
+    pub profiles: Vec<RawProfile>,
+}
+
+/// One `[[profile]]` entry — an enrollment profile, structurally a
+/// sibling of [`RawRole`]: a `name` plus the `roles` it grants. The
+/// enrollee declares a profile (PoP-signed) at `/v1/enroll`; mint owns
+/// the mapping here, so the enrollee can only pick a profile, never a
+/// role subset. The granted set is enforced at `/v1/enroll-exchange`
+/// (`docs/enroll-profiles.md`).
+#[derive(Debug, Deserialize)]
+pub struct RawProfile {
+    /// The profile name an enrollee declares (`--profile <name>`).
+    pub name: String,
+    /// The roles this profile grants, e.g.
+    /// `["coord-ro", "coord-rw"]`. Each must be a configured `[[role]]`.
+    pub roles: Vec<String>,
 }
 
 /// `[auth]` table: the auth plane. `location` is the discharge URL
@@ -505,6 +579,15 @@ pub struct Config {
     /// binding a non-reserved caveat) without it is rejected at load.
     pub attestation_location: Option<String>,
     pub roles: BTreeMap<String, Role>,
+    /// Enrollment profile name → the role set it grants
+    /// (`docs/enroll-profiles.md`), resolved from the `[[profile]]`
+    /// catalog. An enrollee declares a profile at `/v1/enroll`; the
+    /// profile is recorded on its enrolled record (MAC-covered) and
+    /// `/v1/enroll-exchange` refuses any role outside
+    /// `profiles[record.profile]`. Validated non-empty at load, every
+    /// granted role a configured [`Role`]; the profile name space is the
+    /// deployment's own (mint coins none).
+    pub profiles: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -584,8 +667,30 @@ impl Config {
             Some(a) => (a.location, a.demo),
             None => (None, None),
         };
+        // The role + profile catalog comes from `catalog_file` when set,
+        // else inline from the main config. The two are mutually exclusive
+        // — a catalog_file with inline entries is an authoring mistake, so
+        // reject it rather than silently picking one. The file resolves
+        // cwd-relative (or absolute), the same rule as `roles_dir`.
+        let (raw_roles, raw_profiles) = match raw.catalog_file {
+            Some(path) => {
+                if !raw.roles.is_empty() || !raw.profiles.is_empty() {
+                    return Err(ConfigError::CatalogAndInline);
+                }
+                let text = std::fs::read_to_string(&path).map_err(|source| {
+                    ConfigError::ReadCatalogFile {
+                        path: path.clone(),
+                        source,
+                    }
+                })?;
+                let catalog: RawCatalog = toml::from_str(&text)
+                    .map_err(|source| ConfigError::ParseCatalog { path, source })?;
+                (catalog.roles, catalog.profiles)
+            }
+            None => (raw.roles, raw.profiles),
+        };
         let mut roles = BTreeMap::new();
-        for r in raw.roles {
+        for r in raw_roles {
             if r.ttl_seconds == 0 {
                 return Err(ConfigError::ZeroTtl {
                     role: r.name.clone(),
@@ -627,6 +732,34 @@ impl Config {
             };
             if roles.insert(r.name.clone(), role).is_some() {
                 return Err(ConfigError::DuplicateRole(r.name));
+            }
+        }
+        // The `[[profile]]` catalog (`docs/enroll-profiles.md`), a sibling
+        // of `[[role]]`. Required and non-empty: a missing catalog is
+        // fail-closed, not a silent "grant everything" — an enrollee that
+        // omits its profile, or names one this mint doesn't define, is
+        // refused at `/v1/enroll`. Each profile grants only configured
+        // roles, so a typo can't widen a grant to a role that doesn't
+        // exist. Resolved into a `name → roles` map keyed for the
+        // exchange-time lookup.
+        if raw_profiles.is_empty() {
+            return Err(ConfigError::NoProfiles);
+        }
+        let mut profiles = BTreeMap::new();
+        for p in raw_profiles {
+            if p.roles.is_empty() {
+                return Err(ConfigError::EmptyProfile { profile: p.name });
+            }
+            for role in &p.roles {
+                if !roles.contains_key(role) {
+                    return Err(ConfigError::ProfileUnknownRole {
+                        profile: p.name.clone(),
+                        role: role.clone(),
+                    });
+                }
+            }
+            if profiles.insert(p.name.clone(), p.roles).is_some() {
+                return Err(ConfigError::DuplicateProfile(p.name));
             }
         }
         let data_dir = raw
@@ -684,6 +817,7 @@ impl Config {
             auth_location,
             attestation_location,
             roles,
+            profiles,
         })
     }
 
@@ -864,6 +998,10 @@ bucket = "demo-bucket"
 name = "volume-ro"
 ttl_seconds = 2592000
 policy_file = "volume-ro.json"
+
+[[profile]]
+name = "client"
+roles = ["volume-ro"]
 "#;
 
     #[test]
@@ -872,6 +1010,109 @@ policy_file = "volume-ro.json"
         assert_eq!(c.audience, "mint");
         assert_eq!(c.store.bucket, "demo-bucket");
         assert_eq!(c.roles["volume-ro"].policy, "{}");
+    }
+
+    #[test]
+    fn profiles_resolve_to_their_role_sets() {
+        let c = parse_for_test(SAMPLE, &[("volume-ro.json", "{}")]).expect("parse");
+        assert_eq!(c.profiles["client"], vec!["volume-ro".to_string()]);
+    }
+
+    #[test]
+    fn rejects_missing_profiles() {
+        // `[[profile]]` is required: a deployment with none can never
+        // enroll anyone, so fail closed at load rather than at the first
+        // `/v1/enroll`.
+        let toml = SAMPLE.replace(
+            "[[profile]]\nname = \"client\"\nroles = [\"volume-ro\"]\n",
+            "",
+        );
+        assert!(matches!(
+            parse_for_test(&toml, &[("volume-ro.json", "{}")]),
+            Err(ConfigError::NoProfiles)
+        ));
+    }
+
+    #[test]
+    fn rejects_empty_profile() {
+        let toml = SAMPLE.replace("roles = [\"volume-ro\"]", "roles = []");
+        assert!(matches!(
+            parse_for_test(&toml, &[("volume-ro.json", "{}")]),
+            Err(ConfigError::EmptyProfile { profile }) if profile == "client"
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_profile() {
+        // Two `[[profile]]` entries with the same name is an authoring
+        // error, like a duplicate role name.
+        let toml = SAMPLE.replace(
+            "[[profile]]\nname = \"client\"\nroles = [\"volume-ro\"]\n",
+            "[[profile]]\nname = \"client\"\nroles = [\"volume-ro\"]\n\
+             [[profile]]\nname = \"client\"\nroles = [\"volume-ro\"]\n",
+        );
+        assert!(matches!(
+            parse_for_test(&toml, &[("volume-ro.json", "{}")]),
+            Err(ConfigError::DuplicateProfile(name)) if name == "client"
+        ));
+    }
+
+    #[test]
+    fn rejects_profile_granting_unknown_role() {
+        // A profile may only grant roles the mint actually defines, so a
+        // typo can't create a grant for a role that doesn't exist.
+        let toml = SAMPLE.replace("roles = [\"volume-ro\"]", "roles = [\"ghost\"]");
+        assert!(matches!(
+            parse_for_test(&toml, &[("volume-ro.json", "{}")]),
+            Err(ConfigError::ProfileUnknownRole { profile, role })
+                if profile == "client" && role == "ghost"
+        ));
+    }
+
+    #[test]
+    fn catalog_file_supplies_roles_and_profiles() {
+        // With `catalog_file` set, the [[role]] + [[profile]] catalog
+        // lives in that file; the main config carries only operational
+        // keys. The resolved roles/profiles are identical to the inline
+        // form.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("volume-ro.json"), "{}").expect("policy");
+        let catalog = dir.path().join("catalog.toml");
+        std::fs::write(
+            &catalog,
+            r#"
+[[role]]
+name = "volume-ro"
+ttl_seconds = 100
+policy_file = "volume-ro.json"
+
+[[profile]]
+name = "client"
+roles = ["volume-ro"]
+"#,
+        )
+        .expect("catalog");
+        let toml = format!(
+            "audience = \"mint\"\nroles_dir = {:?}\ncatalog_file = {:?}\n[store]\nbucket = \"b\"\n",
+            dir.path().display().to_string(),
+            catalog.display().to_string(),
+        );
+        let c = Config::from_toml_str(&toml).expect("loads catalog");
+        assert_eq!(c.roles["volume-ro"].ttl_seconds, 100);
+        assert_eq!(c.profiles["client"], vec!["volume-ro".to_string()]);
+    }
+
+    #[test]
+    fn rejects_catalog_file_with_inline_catalog() {
+        // catalog_file and inline [[role]]/[[profile]] are mutually
+        // exclusive — the inline check fires before the file is read, so
+        // a bogus path still surfaces the authoring mistake.
+        let toml = "audience = \"mint\"\ncatalog_file = \"nope.toml\"\n[store]\nbucket = \"b\"\n\
+                    [[role]]\nname = \"r\"\nttl_seconds = 100\n";
+        assert!(matches!(
+            Config::from_toml_str(toml),
+            Err(ConfigError::CatalogAndInline)
+        ));
     }
 
     const ATTESTATION_SAMPLE: &str = r#"
@@ -892,6 +1133,14 @@ policy_file = "volume-ro.json"
 name = "coord-base"
 ttl_seconds = 100
 policy_file = "coord-base.json"
+
+[[profile]]
+name = "full"
+roles = ["volume-rw", "volume-ro", "coord-base"]
+
+[[profile]]
+name = "readonly"
+roles = ["volume-ro"]
 "#;
 
     /// Policies for `ATTESTATION_SAMPLE`: the `volume-*` roles bind a
@@ -946,6 +1195,10 @@ bucket = "state-bucket"
 name = "r"
 ttl_seconds = 100
 policy_file = "r.json"
+
+[[profile]]
+name = "client"
+roles = ["r"]
 "#;
 
     /// A single-role config that supplies an [attestation] location, so a
@@ -961,6 +1214,10 @@ location = "https://a.example/v1/discharge"
 name = "r"
 ttl_seconds = 100
 policy_file = "r.json"
+
+[[profile]]
+name = "client"
+roles = ["r"]
 "#;
 
     #[test]

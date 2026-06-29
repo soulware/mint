@@ -243,6 +243,9 @@ pub struct EnrollmentRow {
     /// `"pending"` or `"enrolled"`.
     pub state: String,
     pub pubkey: String,
+    /// The enrollment profile / privilege class the operator ratifies at
+    /// approve (`docs/enroll-profiles.md`). Empty for a revoked row.
+    pub profile: String,
     pub fingerprint: String,
     pub peer_ip: Option<String>,
     pub age_seconds: u64,
@@ -259,6 +262,7 @@ impl From<EnrollmentView> for EnrollmentRow {
                 EnrollmentState::Revoked => "revoked".into(),
             },
             pubkey: v.pubkey,
+            profile: v.profile,
             fingerprint: v.fingerprint,
             peer_ip: v.peer_ip,
             age_seconds: v.age_seconds,
@@ -294,6 +298,10 @@ async fn handle_list_enrollments(
 pub struct ApproveRequest {
     pub sub: String,
     pub pubkey: String,
+    /// The enrollment profile the operator ratifies — taken from the
+    /// pending row the operator just read and confirmed, and written
+    /// onto the enrolled record under its MAC (`docs/enroll-profiles.md`).
+    pub profile: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -317,7 +325,13 @@ async fn handle_approve(
     let approved_at = Utc::now().to_rfc3339();
     match state
         .store
-        .approve(&req.sub, &req.pubkey, &approved_by, &approved_at)
+        .approve(
+            &req.sub,
+            &req.pubkey,
+            &req.profile,
+            &approved_by,
+            &approved_at,
+        )
         .await
     {
         Ok(()) => {

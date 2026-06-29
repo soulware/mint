@@ -42,6 +42,10 @@ name = "volume-rw"
 ttl_seconds = 900
 policy_file = "volume-rw.json"
 tpc = { location = "https://auth.example/" }
+
+[[profile]]
+name = "client"
+roles = ["volume-rw"]
 "#;
 
 #[derive(Clone)]

@@ -73,6 +73,10 @@ name = "volume-rw"
 ttl_seconds = 900
 policy_file = "volume-rw.json"
 tpc = { location = "https://auth.example/v1/discharge" }
+
+[[profile]]
+name = "client"
+roles = ["volume-rw"]
 "#;
 
 fn config() -> Config {
@@ -349,7 +353,7 @@ async fn one_wide_discharge_satisfies_every_verb() {
             OP_ENROLL_APPROVE,
             "POST",
             "/v1/admin/enroll/approve",
-            serde_json::json!({ "ts": now(), "sub": SUB, "pubkey": pop::cnf_value(&SigningKey::from_bytes(&[1u8; 32])) })
+            serde_json::json!({ "ts": now(), "sub": SUB, "pubkey": pop::cnf_value(&SigningKey::from_bytes(&[1u8; 32])), "profile": "client" })
                 .to_string(),
         ),
         (
