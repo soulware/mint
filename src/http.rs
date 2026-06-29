@@ -1171,20 +1171,20 @@ async fn enroll_exchange(
 
     // Enforce the enrollment's granted role set (`docs/enroll-profiles.md`).
     // The `profile` was ratified by the operator at approval and is
-    // MAC-bound on the enrolled record; mint resolves it to a role set
-    // here and refuses any role outside it. This is the structural
-    // backstop that keeps a read-only enrollment (e.g. a dedicated
-    // attestation authority granted only its read role) from exchanging a
-    // writing role even if its client asks. `422` is deliberate — outside
-    // the `{200, 401, 403}` the exchange client interprets (`403` =
-    // awaiting approval, `401` = ticket expired), so a client reaching
-    // past its grant fails loudly instead of polling forever. A
-    // legitimate client, only ever asking for a granted role, never hits
-    // it.
-    let granted = state
-        .config
-        .profiles
-        .get(&enrolled_profile)
+    // MAC-bound on the enrolled record; mint resolves it to a role set and
+    // refuses any role outside it. The grant is read from the **sealed**
+    // surface (like the role-existence check below), not the live config —
+    // so every host enforces the operator-ratified profile, never a
+    // drifted local one. This is the structural backstop that keeps a
+    // read-only enrollment (e.g. a dedicated attestation authority granted
+    // only its read role) from exchanging a writing role even if its
+    // client asks. `422` is deliberate — outside the `{200, 401, 403}` the
+    // exchange client interprets (`403` = awaiting approval, `401` = ticket
+    // expired), so a client reaching past its grant fails loudly instead of
+    // polling forever. A legitimate client, only ever asking for a granted
+    // role, never hits it.
+    let granted = surface
+        .profile(&enrolled_profile)
         .is_some_and(|roles| roles.iter().any(|r| r == &exch.role));
     if !granted {
         audit("denied:role_not_granted", &caveats, &exch.role);

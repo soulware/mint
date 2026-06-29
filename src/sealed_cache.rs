@@ -136,6 +136,14 @@ impl ServedSurface {
         self.seal.roles.get(role)
     }
 
+    /// The roles the enrollment `profile` grants, or `None` if the profile
+    /// is not in the sealed surface (`docs/enroll-profiles.md`).
+    /// `/v1/enroll-exchange` checks the requested role against this, so the
+    /// grant enforced is the sealed one — never a drifted local config.
+    pub fn profile(&self, profile: &str) -> Option<&Vec<String>> {
+        self.seal.profiles.get(profile)
+    }
+
     /// The sealed policy template for `role`.
     pub fn policy(&self, role: &str) -> Option<&str> {
         self.templates.get(role)

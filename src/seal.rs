@@ -70,12 +70,21 @@ pub struct SealedRole {
     pub attested: Vec<String>,
 }
 
-/// The complete seal: every role, plus the audience. MAC'd under one
-/// keyring generation so a single object covers the whole deployment.
+/// The complete seal: every role and enrollment profile, plus the
+/// audience. MAC'd under one keyring generation so a single object covers
+/// the whole deployment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Seal {
     pub audience: String,
     pub roles: BTreeMap<String, SealedRole>,
+    /// Enrollment profile → granted role set (`docs/enroll-profiles.md`).
+    /// An authorization surface as load-bearing as a role's `ttl`/policy:
+    /// it decides which roles an enrollment may exchange. Sealing it gives
+    /// it the same operator-consent, multi-host consistency, and
+    /// tamper-evidence — `/v1/enroll-exchange` enforces the grant against
+    /// the *sealed* profiles, never a drifted local config.
+    #[serde(default)]
+    pub profiles: BTreeMap<String, Vec<String>>,
     /// RFC 3339 timestamp the seal was authored. Diagnostic only — not
     /// part of the *intent* checked by [`Self::semantically_equal`], so
     /// two hosts signing identical templates seconds apart produce
@@ -141,6 +150,7 @@ impl Seal {
         let mut seal = Seal {
             audience: config.audience.clone(),
             roles,
+            profiles: config.profiles.clone(),
             sealed_at: sealed_at.to_string(),
             kid,
             mac: String::new(),
@@ -168,12 +178,14 @@ impl Seal {
     }
 
     /// Two seals are *semantically* equal when they pin the same
-    /// intent — audience + per-role `ttl_seconds` and policy hash.
-    /// `sealed_at`, `kid`, and `mac` are explicitly
-    /// ignored so two hosts signing identical templates produce
-    /// reconciliation-equal seals.
+    /// intent — audience + per-role `ttl_seconds`/policy hash + the
+    /// enrollment profile grants. `sealed_at`, `kid`, and `mac` are
+    /// explicitly ignored so two hosts signing identical templates
+    /// produce reconciliation-equal seals.
     pub fn semantically_equal(&self, other: &Seal) -> bool {
-        self.audience == other.audience && self.roles == other.roles
+        self.audience == other.audience
+            && self.roles == other.roles
+            && self.profiles == other.profiles
     }
 
     /// Compute the MAC under `key`. The MAC input is the seal
@@ -184,6 +196,7 @@ impl Seal {
         let canonical = Seal {
             audience: self.audience.clone(),
             roles: self.roles.clone(),
+            profiles: self.profiles.clone(),
             sealed_at: self.sealed_at.clone(),
             kid: self.kid,
             mac: String::new(),
@@ -245,6 +258,25 @@ impl Seal {
         for name in self.roles.keys() {
             if !config.roles.contains_key(name) {
                 diffs.push(format!("role {name}: in seal but absent from local config"));
+            }
+        }
+        // Enrollment profiles present locally but not in the seal, or
+        // where the granted role set disagrees.
+        for (name, roles) in &config.profiles {
+            match self.profiles.get(name) {
+                None => diffs.push(format!("profile {name}: not in seal")),
+                Some(sealed) if sealed != roles => diffs.push(format!(
+                    "profile {name}: roles sealed as {sealed:?}, local config has {roles:?}"
+                )),
+                Some(_) => {}
+            }
+        }
+        // Profiles in the seal that are absent from the local config.
+        for name in self.profiles.keys() {
+            if !config.profiles.contains_key(name) {
+                diffs.push(format!(
+                    "profile {name}: in seal but absent from local config"
+                ));
             }
         }
         diffs
@@ -569,6 +601,40 @@ roles = ["volume-ro"]
     }
 
     #[test]
+    fn profile_grant_is_sealed_and_drift_is_diffed() {
+        // Enrollment profiles are an authority surface, so they MAC into
+        // the seal and a host whose profile set drifts is flagged — the
+        // grant a host enforces is the sealed one, not a drifted local
+        // config (`docs/enroll-profiles.md`).
+        let kr = Keyring::single([7u8; 32]);
+        let cfg = config();
+        let seal = Seal::build_from_config(&cfg, &kr, "t");
+        assert_eq!(seal.profiles["client"], vec!["volume-ro".to_string()]);
+        assert!(seal.diff_against_config(&cfg).is_empty());
+
+        // Rename the profile locally: the seal pins `client`, the config
+        // now has `renamed` — both sides of the divergence are reported.
+        let drifted = parse_for_test(
+            &SAMPLE_TOML.replace("name = \"client\"", "name = \"renamed\""),
+            &[("volume-ro.json", "{\"Statement\":[]}")],
+        )
+        .expect("parse");
+        let diffs = seal.diff_against_config(&drifted);
+        assert!(
+            diffs
+                .iter()
+                .any(|d| d.contains("profile renamed: not in seal")),
+            "diffs: {diffs:?}"
+        );
+        assert!(
+            diffs
+                .iter()
+                .any(|d| d.contains("profile client: in seal but absent")),
+            "diffs: {diffs:?}"
+        );
+    }
+
+    #[test]
     fn diff_reports_template_hash_mismatch() {
         // The render-time integrity check: a sealed hash that
         // doesn't match the on-disk file is the operator's signal
@@ -709,6 +775,7 @@ roles = ["coord-rw"]
         let forged = Seal {
             audience: "mint".into(),
             roles: BTreeMap::new(),
+            profiles: BTreeMap::new(),
             sealed_at: "t".into(),
             kid: 0,
             mac: "00".repeat(32),
