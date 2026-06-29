@@ -44,6 +44,9 @@ location = "https://attest.elide.internal/v1/discharge"
 name = "attested-write"
 ttl_seconds = 300
 policy_file = "attested-write.json"
+
+[enroll.kinds]
+client = ["attested-write"]
 "#;
 
 /// The shipped demo template: a literal bucket/prefix plus the caveat and
@@ -92,6 +95,7 @@ async fn demo_state() -> (AppState, Arc<FakeMinter>, [u8; 32], tempfile::TempDir
         .approve(
             SUB,
             &pop::cnf_value(&SigningKey::from_bytes(&CLIENT_SEED)),
+            "client",
             "usr_test",
             &chrono::Utc::now().to_rfc3339(),
         )

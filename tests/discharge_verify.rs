@@ -42,6 +42,9 @@ name = "volume-rw"
 ttl_seconds = 900
 policy_file = "volume-rw.json"
 tpc = { location = "https://auth.example/" }
+
+[enroll.kinds]
+client = ["volume-rw"]
 "#;
 
 #[derive(Clone)]

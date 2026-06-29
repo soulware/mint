@@ -96,6 +96,19 @@ struct ExchangeBody {
     role: String,
 }
 
+/// `/v1/enroll` body — `{ts, kind}`. `ts` is the PoP freshness stamp
+/// (read by the PoP machinery, which signs the whole body); `kind` is
+/// the enrollment kind the enrollee declares — the selector mint maps to
+/// the role set this enrollment may exchange (`docs/enroll-kinds.md`).
+/// Both are authenticated by the same PoP signature, so the declared
+/// grant is bound to the enrollee and not forgeable in transit. Required
+/// and fail-closed: an absent or malformed `kind` is rejected, never
+/// defaulted to a wider grant.
+#[derive(Deserialize)]
+struct EnrollBody {
+    kind: String,
+}
+
 fn respond(request_id: &str, status: StatusCode, body: serde_json::Value) -> Response {
     let mut resp = (status, axum::Json(body)).into_response();
     if let Ok(v) = request_id.parse() {
@@ -831,6 +844,27 @@ async fn enroll(State(state): State<AppState>, headers: HeaderMap, body: Bytes) 
         }
     };
 
+    // The enrollee declares its kind in the PoP-signed body; mint owns
+    // the kind → granted-role-set mapping (`docs/enroll-kinds.md`), so
+    // the enrollee selects a privilege class, never an arbitrary role
+    // subset. Required and fail-closed: an absent or unrecognised kind
+    // is a `400`, never silently widened to a broader grant. The kind is
+    // recorded on the pending entry and ratified by the operator at
+    // `approve`; `/v1/enroll-exchange` enforces role ∈ grant. This is a
+    // request-shape error, not an auth failure, so it is `400` rather
+    // than the opaque `401` the auth gates collapse to.
+    let kind = match serde_json::from_slice::<EnrollBody>(&body) {
+        Ok(b) if state.config.enroll_kinds.contains_key(&b.kind) => b.kind,
+        _ => {
+            audit("denied:kind", &caveats);
+            return respond(
+                &request_id,
+                StatusCode::BAD_REQUEST,
+                json!({"error": "missing or unknown enrollment kind"}),
+            );
+        }
+    };
+
     // Every Err branch returns the same opaque 401 to the client —
     // the audit tag is the only place we distinguish, so operators
     // reading mint's log can tell `denied:conflict` (genuine
@@ -840,7 +874,15 @@ async fn enroll(State(state): State<AppState>, headers: HeaderMap, body: Bytes) 
     // client signal is unchanged.
     let recorded = match state
         .store
-        .record_pending(&sub, &cnf, &current, &requested_by, &caller, now_unix)
+        .record_pending(
+            &sub,
+            &cnf,
+            &kind,
+            &current,
+            &requested_by,
+            &caller,
+            now_unix,
+        )
         .await
     {
         Ok(r) => r,
@@ -1057,9 +1099,11 @@ async fn enroll_exchange(
     // pinned pub must match the presented cnf — the operator approved
     // *this* (sub, pub) pair (`docs/design-mint.md` § *Enrollment* (3)).
     // Its `rev_epoch` is stamped onto the minted credential so a later
-    // revoke can kill it (§ *Revocation*).
-    let rev_epoch = match state.store.get_enrolled(&sub).await {
-        Ok(Some(a)) if a.pubkey == cnf => a.rev_epoch,
+    // revoke can kill it (§ *Revocation*); its `kind` is the
+    // operator-ratified grant the requested role is checked against
+    // below (`docs/enroll-kinds.md`).
+    let (rev_epoch, enrolled_kind) = match state.store.get_enrolled(&sub).await {
+        Ok(Some(a)) if a.pubkey == cnf => (a.rev_epoch, a.kind),
         // The one non-401 authorization outcome: awaited, not a
         // failure. Includes both "never approved" and "approved
         // under a different pub" (pending key-rotation re-approval).
@@ -1124,6 +1168,33 @@ async fn enroll_exchange(
             return unauthorized(&request_id);
         }
     };
+
+    // Enforce the enrollment's granted role set (`docs/enroll-kinds.md`).
+    // The `kind` was ratified by the operator at approval and is
+    // MAC-bound on the enrolled record; mint resolves it to a role set
+    // here and refuses any role outside it. This is the structural
+    // backstop that keeps a read-only enrollment (e.g. a dedicated
+    // attestation authority granted only its read role) from exchanging a
+    // writing role even if its client asks. `422` is deliberate — outside
+    // the `{200, 401, 403}` the exchange client interprets (`403` =
+    // awaiting approval, `401` = ticket expired), so a client reaching
+    // past its grant fails loudly instead of polling forever. A
+    // legitimate client, only ever asking for a granted role, never hits
+    // it.
+    let granted = state
+        .config
+        .enroll_kinds
+        .get(&enrolled_kind)
+        .is_some_and(|roles| roles.iter().any(|r| r == &exch.role));
+    if !granted {
+        audit("denied:role_not_granted", &caveats, &exch.role);
+        return respond(
+            &request_id,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({"error": "role not granted to this enrollment kind"}),
+        );
+    }
+
     if surface.role(&exch.role).is_none() {
         audit("denied:unknown_role", &caveats, "");
         return unauthorized(&request_id);

@@ -89,6 +89,20 @@ pub enum ConfigError {
          mint-computed value"
     )]
     UnknownMintKey { role: String, key: String },
+    #[error(
+        "no [enroll.kinds] configured — every deployment must declare at least \
+         one enrollment kind (a kind name mapped to the role set it grants); an \
+         enrollee declares its kind at /v1/enroll and mint enforces role ∈ grant \
+         at /v1/enroll-exchange"
+    )]
+    NoEnrollKinds,
+    #[error("enroll kind {kind:?}: grants no roles — a kind must grant at least one role")]
+    EmptyEnrollKind { kind: String },
+    #[error(
+        "enroll kind {kind:?}: grants role {role:?}, which is not a configured \
+         [[role]] — a kind may only grant roles this mint defines"
+    )]
+    EnrollKindUnknownRole { kind: String, role: String },
 }
 
 /// Normalise a declared field set (`attested`/`caveat`) to a canonical sorted,
@@ -195,6 +209,26 @@ pub struct RawConfig {
     pub attestation: Option<RawAttestation>,
     #[serde(rename = "role", default)]
     pub roles: Vec<RawRole>,
+    /// The `[enroll]` plane: the kind → granted-role-set table an
+    /// enrollee selects from at `/v1/enroll`. Required and non-empty —
+    /// see [`ConfigError::NoEnrollKinds`].
+    #[serde(default)]
+    pub enroll: Option<RawEnroll>,
+}
+
+/// `[enroll]` table: enrollment policy. Today this is just the
+/// `[enroll.kinds]` map — each entry names an enrollment *kind* and the
+/// role set that kind grants. The enrollee declares a kind (PoP-signed)
+/// at `/v1/enroll`; mint owns the mapping here, so the enrollee can only
+/// pick a kind, never a role subset. The granted set is enforced at
+/// `/v1/enroll-exchange` (`docs/enroll-kinds.md`).
+#[derive(Debug, Deserialize)]
+pub struct RawEnroll {
+    /// Kind name → the roles it grants, e.g.
+    /// `coordinator = ["coord-ro", "coord-rw"]`. Each role must be a
+    /// configured `[[role]]`.
+    #[serde(default)]
+    pub kinds: BTreeMap<String, Vec<String>>,
 }
 
 /// `[auth]` table: the auth plane. `location` is the discharge URL
@@ -505,6 +539,14 @@ pub struct Config {
     /// binding a non-reserved caveat) without it is rejected at load.
     pub attestation_location: Option<String>,
     pub roles: BTreeMap<String, Role>,
+    /// Enrollment kind → the role set it grants
+    /// (`docs/enroll-kinds.md`). An enrollee declares a kind at
+    /// `/v1/enroll`; the kind is recorded on its enrolled record
+    /// (MAC-covered) and `/v1/enroll-exchange` refuses any role outside
+    /// `enroll_kinds[record.kind]`. Validated non-empty at load, every
+    /// granted role a configured [`Role`]; the kind name space is the
+    /// deployment's own (mint coins none).
+    pub enroll_kinds: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -629,6 +671,29 @@ impl Config {
                 return Err(ConfigError::DuplicateRole(r.name));
             }
         }
+        // Enrollment kinds (`docs/enroll-kinds.md`). Required and
+        // non-empty: a missing table is fail-closed, not a silent
+        // "grant everything" — an enrollee that omits its kind, or
+        // names one this mint doesn't define, is refused at
+        // `/v1/enroll`. Each kind may grant only configured roles, so a
+        // typo can't widen a grant to a role that doesn't exist.
+        let enroll_kinds = raw.enroll.map(|e| e.kinds).unwrap_or_default();
+        if enroll_kinds.is_empty() {
+            return Err(ConfigError::NoEnrollKinds);
+        }
+        for (kind, granted) in &enroll_kinds {
+            if granted.is_empty() {
+                return Err(ConfigError::EmptyEnrollKind { kind: kind.clone() });
+            }
+            for role in granted {
+                if !roles.contains_key(role) {
+                    return Err(ConfigError::EnrollKindUnknownRole {
+                        kind: kind.clone(),
+                        role: role.clone(),
+                    });
+                }
+            }
+        }
         let data_dir = raw
             .data_dir
             .map(PathBuf::from)
@@ -684,6 +749,7 @@ impl Config {
             auth_location,
             attestation_location,
             roles,
+            enroll_kinds,
         })
     }
 
@@ -864,6 +930,9 @@ bucket = "demo-bucket"
 name = "volume-ro"
 ttl_seconds = 2592000
 policy_file = "volume-ro.json"
+
+[enroll.kinds]
+client = ["volume-ro"]
 "#;
 
     #[test]
@@ -872,6 +941,45 @@ policy_file = "volume-ro.json"
         assert_eq!(c.audience, "mint");
         assert_eq!(c.store.bucket, "demo-bucket");
         assert_eq!(c.roles["volume-ro"].policy, "{}");
+    }
+
+    #[test]
+    fn enroll_kinds_resolve_to_their_role_sets() {
+        let c = parse_for_test(SAMPLE, &[("volume-ro.json", "{}")]).expect("parse");
+        assert_eq!(c.enroll_kinds["client"], vec!["volume-ro".to_string()]);
+    }
+
+    #[test]
+    fn rejects_missing_enroll_kinds() {
+        // `[enroll.kinds]` is required: a deployment with none can never
+        // enroll anyone, so fail closed at load rather than at the first
+        // `/v1/enroll`.
+        let toml = SAMPLE.replace("[enroll.kinds]\nclient = [\"volume-ro\"]\n", "");
+        assert!(matches!(
+            parse_for_test(&toml, &[("volume-ro.json", "{}")]),
+            Err(ConfigError::NoEnrollKinds)
+        ));
+    }
+
+    #[test]
+    fn rejects_empty_enroll_kind() {
+        let toml = SAMPLE.replace("client = [\"volume-ro\"]", "client = []");
+        assert!(matches!(
+            parse_for_test(&toml, &[("volume-ro.json", "{}")]),
+            Err(ConfigError::EmptyEnrollKind { kind }) if kind == "client"
+        ));
+    }
+
+    #[test]
+    fn rejects_enroll_kind_granting_unknown_role() {
+        // A kind may only grant roles the mint actually defines, so a
+        // typo can't create a grant for a role that doesn't exist.
+        let toml = SAMPLE.replace("client = [\"volume-ro\"]", "client = [\"ghost\"]");
+        assert!(matches!(
+            parse_for_test(&toml, &[("volume-ro.json", "{}")]),
+            Err(ConfigError::EnrollKindUnknownRole { kind, role })
+                if kind == "client" && role == "ghost"
+        ));
     }
 
     const ATTESTATION_SAMPLE: &str = r#"
@@ -892,6 +1000,10 @@ policy_file = "volume-ro.json"
 name = "coord-base"
 ttl_seconds = 100
 policy_file = "coord-base.json"
+
+[enroll.kinds]
+full = ["volume-rw", "volume-ro", "coord-base"]
+readonly = ["volume-ro"]
 "#;
 
     /// Policies for `ATTESTATION_SAMPLE`: the `volume-*` roles bind a
@@ -946,6 +1058,9 @@ bucket = "state-bucket"
 name = "r"
 ttl_seconds = 100
 policy_file = "r.json"
+
+[enroll.kinds]
+client = ["r"]
 "#;
 
     /// A single-role config that supplies an [attestation] location, so a
@@ -961,6 +1076,9 @@ location = "https://a.example/v1/discharge"
 name = "r"
 ttl_seconds = 100
 policy_file = "r.json"
+
+[enroll.kinds]
+client = ["r"]
 "#;
 
     #[test]

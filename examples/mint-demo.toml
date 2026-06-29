@@ -113,3 +113,19 @@ ttl_seconds = 900
 [[role]]
 name = "demo-attested"
 ttl_seconds = 300
+
+# Enrollment kinds (docs/enroll-kinds.md). An enrollee declares a `kind`
+# at `mint client enroll --kind <name>`; mint maps it here to the role
+# set that enrollment may exchange, and the operator ratifies the kind at
+# `mint enroll approve`. The kind name space is the deployment's own —
+# mint coins none. Required and fail-closed: an enrollee whose `kind` is
+# absent or not listed here is refused at enroll, and `enroll-exchange`
+# refuses any role outside the granted set. At least one kind must be
+# declared.
+[enroll.kinds]
+# A full client may exchange either demo role.
+client = ["demo", "demo-attested"]
+# A read-only enrollee (e.g. a dedicated attestation authority) is held to
+# the issuer-only role and can never exchange the attested one — the grant
+# is mint-enforced, not convention.
+readonly = ["demo"]

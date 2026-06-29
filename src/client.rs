@@ -295,6 +295,7 @@ pub async fn enroll(
     base_url: &str,
     invite_src: &str,
     sub: &str,
+    kind: &str,
     out: &str,
 ) -> Result<(), ClientError> {
     let sk = load_key(dir)?;
@@ -303,9 +304,10 @@ pub async fn enroll(
         .attenuate(Caveat::scalar(name::SUB, sub))
         .attenuate(Caveat::scalar(name::CNF, cnf.clone()));
     eprintln!("enroll: attenuating the operator's invite macaroon with your identity");
-    eprintln!("  sub = {sub}  (the principal you are claiming)");
+    eprintln!("  sub  = {sub}  (the principal you are claiming)");
+    eprintln!("  kind = {kind}  (the privilege class the operator will ratify)");
     eprintln!(
-        "  cnf = {}  (your client key — binds the token to you)",
+        "  cnf  = {}  (your client key — binds the token to you)",
         abbrev(&cnf)
     );
     // The invite carries the enroll gate (a third-party caveat): fetch
@@ -313,7 +315,15 @@ pub async fn enroll(
     // it alongside. Requires a logged-in session (`mint login`).
     let discharges = gate_discharges(&presented, scope::MINT_ENROLL).await?;
     eprintln!("  → POST {base_url}/v1/enroll  (signed with your client key)");
-    let body = format!(r#"{{"ts":{}}}"#, now_unix());
+    // `kind` rides the PoP-signed body alongside `ts`; mint maps it to
+    // the role set this enrollment may exchange (`docs/enroll-kinds.md`).
+    // `serde_json::Value` quotes/escapes it so an exotic kind can't break
+    // out of the JSON string.
+    let body = format!(
+        r#"{{"ts":{},"kind":{}}}"#,
+        now_unix(),
+        serde_json::Value::from(kind)
+    );
     let (status, text) =
         post_bundle(base_url, "/v1/enroll", &presented, &discharges, &sk, body).await?;
     if status != 200 {

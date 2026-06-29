@@ -46,6 +46,9 @@ ttl_seconds = 3600
 [[role]]
 name = "volume-rw"
 ttl_seconds = 86400
+
+[enroll.kinds]
+client = ["volume-ro", "volume-rw"]
 "#
     );
     let path = d.join("mint.toml");

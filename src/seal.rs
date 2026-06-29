@@ -413,6 +413,9 @@ bucket = "demo-bucket"
 name = "volume-ro"
 ttl_seconds = 2592000
 policy_file = "volume-ro.json"
+
+[enroll.kinds]
+client = ["volume-ro"]
 "#;
 
     fn config() -> Config {
@@ -590,6 +593,8 @@ bucket = "demo-bucket"
 name = "coord-rw"
 ttl_seconds = 3600
 policy_file = "coord-rw.json"
+[enroll.kinds]
+client = ["coord-rw"]
 "#;
 
     #[test]
@@ -636,6 +641,8 @@ location = "https://a.example/v1/discharge"
 name = "coord-rw"
 ttl_seconds = 3600
 policy_file = "coord-rw.json"
+[enroll.kinds]
+client = ["coord-rw"]
 "#;
         let cfg = parse_for_test(
             toml,

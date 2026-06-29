@@ -45,6 +45,9 @@ location = "https://coord-b.example/v1/discharge"
 name = "volume-ro"
 ttl_seconds = 2592000
 policy_file = "volume-ro.json"
+
+[enroll.kinds]
+client = ["volume-ro"]
 "#;
 
 const POLICY: &str = r#"
@@ -99,6 +102,7 @@ async fn state_with_audit() -> (
         .approve(
             SUB,
             &pop::cnf_value(&SigningKey::from_bytes(&CLIENT_SEED)),
+            "client",
             "usr_test",
             &chrono::Utc::now().to_rfc3339(),
         )
@@ -439,6 +443,7 @@ async fn re_approval_after_revoke_does_not_revive_old_credential() {
         .approve(
             SUB,
             &pop::cnf_value(&SigningKey::from_bytes(&CLIENT_SEED)),
+            "client",
             "usr_test",
             &chrono::Utc::now().to_rfc3339(),
         )
