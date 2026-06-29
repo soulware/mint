@@ -45,7 +45,7 @@ name = "attested-write"
 ttl_seconds = 300
 policy_file = "attested-write.json"
 
-[enroll.kinds]
+[enroll.profiles]
 client = ["attested-write"]
 "#;
 

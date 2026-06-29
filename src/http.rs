@@ -96,17 +96,17 @@ struct ExchangeBody {
     role: String,
 }
 
-/// `/v1/enroll` body — `{ts, kind}`. `ts` is the PoP freshness stamp
-/// (read by the PoP machinery, which signs the whole body); `kind` is
-/// the enrollment kind the enrollee declares — the selector mint maps to
-/// the role set this enrollment may exchange (`docs/enroll-kinds.md`).
+/// `/v1/enroll` body — `{ts, profile}`. `ts` is the PoP freshness stamp
+/// (read by the PoP machinery, which signs the whole body); `profile` is
+/// the enrollment profile the enrollee declares — the selector mint maps to
+/// the role set this enrollment may exchange (`docs/enroll-profiles.md`).
 /// Both are authenticated by the same PoP signature, so the declared
 /// grant is bound to the enrollee and not forgeable in transit. Required
-/// and fail-closed: an absent or malformed `kind` is rejected, never
+/// and fail-closed: an absent or malformed `profile` is rejected, never
 /// defaulted to a wider grant.
 #[derive(Deserialize)]
 struct EnrollBody {
-    kind: String,
+    profile: String,
 }
 
 fn respond(request_id: &str, status: StatusCode, body: serde_json::Value) -> Response {
@@ -844,23 +844,23 @@ async fn enroll(State(state): State<AppState>, headers: HeaderMap, body: Bytes) 
         }
     };
 
-    // The enrollee declares its kind in the PoP-signed body; mint owns
-    // the kind → granted-role-set mapping (`docs/enroll-kinds.md`), so
+    // The enrollee declares its profile in the PoP-signed body; mint owns
+    // the profile → granted-role-set mapping (`docs/enroll-profiles.md`), so
     // the enrollee selects a privilege class, never an arbitrary role
-    // subset. Required and fail-closed: an absent or unrecognised kind
-    // is a `400`, never silently widened to a broader grant. The kind is
+    // subset. Required and fail-closed: an absent or unrecognised profile
+    // is a `400`, never silently widened to a broader grant. The profile is
     // recorded on the pending entry and ratified by the operator at
     // `approve`; `/v1/enroll-exchange` enforces role ∈ grant. This is a
     // request-shape error, not an auth failure, so it is `400` rather
     // than the opaque `401` the auth gates collapse to.
-    let kind = match serde_json::from_slice::<EnrollBody>(&body) {
-        Ok(b) if state.config.enroll_kinds.contains_key(&b.kind) => b.kind,
+    let profile = match serde_json::from_slice::<EnrollBody>(&body) {
+        Ok(b) if state.config.enroll_profiles.contains_key(&b.profile) => b.profile,
         _ => {
-            audit("denied:kind", &caveats);
+            audit("denied:profile", &caveats);
             return respond(
                 &request_id,
                 StatusCode::BAD_REQUEST,
-                json!({"error": "missing or unknown enrollment kind"}),
+                json!({"error": "missing or unknown enrollment profile"}),
             );
         }
     };
@@ -877,7 +877,7 @@ async fn enroll(State(state): State<AppState>, headers: HeaderMap, body: Bytes) 
         .record_pending(
             &sub,
             &cnf,
-            &kind,
+            &profile,
             &current,
             &requested_by,
             &caller,
@@ -1099,11 +1099,11 @@ async fn enroll_exchange(
     // pinned pub must match the presented cnf — the operator approved
     // *this* (sub, pub) pair (`docs/design-mint.md` § *Enrollment* (3)).
     // Its `rev_epoch` is stamped onto the minted credential so a later
-    // revoke can kill it (§ *Revocation*); its `kind` is the
+    // revoke can kill it (§ *Revocation*); its `profile` is the
     // operator-ratified grant the requested role is checked against
-    // below (`docs/enroll-kinds.md`).
-    let (rev_epoch, enrolled_kind) = match state.store.get_enrolled(&sub).await {
-        Ok(Some(a)) if a.pubkey == cnf => (a.rev_epoch, a.kind),
+    // below (`docs/enroll-profiles.md`).
+    let (rev_epoch, enrolled_profile) = match state.store.get_enrolled(&sub).await {
+        Ok(Some(a)) if a.pubkey == cnf => (a.rev_epoch, a.profile),
         // The one non-401 authorization outcome: awaited, not a
         // failure. Includes both "never approved" and "approved
         // under a different pub" (pending key-rotation re-approval).
@@ -1169,8 +1169,8 @@ async fn enroll_exchange(
         }
     };
 
-    // Enforce the enrollment's granted role set (`docs/enroll-kinds.md`).
-    // The `kind` was ratified by the operator at approval and is
+    // Enforce the enrollment's granted role set (`docs/enroll-profiles.md`).
+    // The `profile` was ratified by the operator at approval and is
     // MAC-bound on the enrolled record; mint resolves it to a role set
     // here and refuses any role outside it. This is the structural
     // backstop that keeps a read-only enrollment (e.g. a dedicated
@@ -1183,15 +1183,15 @@ async fn enroll_exchange(
     // it.
     let granted = state
         .config
-        .enroll_kinds
-        .get(&enrolled_kind)
+        .enroll_profiles
+        .get(&enrolled_profile)
         .is_some_and(|roles| roles.iter().any(|r| r == &exch.role));
     if !granted {
         audit("denied:role_not_granted", &caveats, &exch.role);
         return respond(
             &request_id,
             StatusCode::UNPROCESSABLE_ENTITY,
-            json!({"error": "role not granted to this enrollment kind"}),
+            json!({"error": "role not granted to this enrollment profile"}),
         );
     }
 

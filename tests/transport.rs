@@ -42,7 +42,7 @@ name = "writer"
 ttl_seconds = 900
 policy_file = "writer.json"
 
-[enroll.kinds]
+[enroll.profiles]
 client = ["writer"]
 "#;
 

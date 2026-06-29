@@ -47,7 +47,7 @@ ttl_seconds = 3600
 name = "volume-rw"
 ttl_seconds = 86400
 
-[enroll.kinds]
+[enroll.profiles]
 client = ["volume-ro", "volume-rw"]
 "#
     );

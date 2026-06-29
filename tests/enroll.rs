@@ -61,7 +61,7 @@ name = "volume-rw"
 ttl_seconds = 900
 policy_file = "volume-rw.json"
 
-[enroll.kinds]
+[enroll.profiles]
 full = ["volume-ro", "volume-rw"]
 readonly = ["volume-ro"]
 "#;
@@ -279,7 +279,12 @@ async fn full_flow_enroll_approve_exchange_then_assume_role() {
     // (1) enroll → pending + ticket
     let (status, body) = parts(
         app.clone()
-            .oneshot(signed("/v1/enroll", &cb, &CLIENT_SEED, r#","kind":"full""#))
+            .oneshot(signed(
+                "/v1/enroll",
+                &cb,
+                &CLIENT_SEED,
+                r#","profile":"full""#,
+            ))
             .await
             .unwrap(),
     )
@@ -408,9 +413,9 @@ async fn full_flow_enroll_approve_exchange_then_assume_role() {
         Resolved::Value("volume-rw".into())
     );
 
-    // grant gate: a role no configured kind grants — here `nope` — is the
+    // grant gate: a role no configured profile grants — here `nope` — is the
     // hard 422, ahead of any sealed-role floor check
-    // (`docs/enroll-kinds.md`). The grant check leaks no role-existence
+    // (`docs/enroll-profiles.md`). The grant check leaks no role-existence
     // signal: every ungranted role, known or not, is the same 422.
     let (status, _) = parts(
         app.clone()
@@ -494,7 +499,12 @@ async fn re_enroll_after_keyring_rotation_lazily_migrates_approval() {
     // (1) initial enroll + operator approval under kid=0
     let (status, _) = parts(
         app.clone()
-            .oneshot(signed("/v1/enroll", &cb, &CLIENT_SEED, r#","kind":"full""#))
+            .oneshot(signed(
+                "/v1/enroll",
+                &cb,
+                &CLIENT_SEED,
+                r#","profile":"full""#,
+            ))
             .await
             .unwrap(),
     )
@@ -537,7 +547,12 @@ async fn re_enroll_after_keyring_rotation_lazily_migrates_approval() {
     // (same sub/cnf) and the handler opportunistically re-MACs.
     let (status, _) = parts(
         app.clone()
-            .oneshot(signed("/v1/enroll", &cb, &CLIENT_SEED, r#","kind":"full""#))
+            .oneshot(signed(
+                "/v1/enroll",
+                &cb,
+                &CLIENT_SEED,
+                r#","profile":"full""#,
+            ))
             .await
             .unwrap(),
     )
@@ -567,7 +582,12 @@ async fn idempotent_reenroll_same_pair() {
     for _ in 0..2 {
         let (status, _) = parts(
             app.clone()
-                .oneshot(signed("/v1/enroll", &cb, &CLIENT_SEED, r#","kind":"full""#))
+                .oneshot(signed(
+                    "/v1/enroll",
+                    &cb,
+                    &CLIENT_SEED,
+                    r#","profile":"full""#,
+                ))
                 .await
                 .unwrap(),
         )
@@ -586,7 +606,7 @@ async fn conflicting_key_for_same_sub_is_opaque_401() {
                 "/v1/enroll",
                 &client_invite(&nonce, &CLIENT_SEED),
                 &CLIENT_SEED,
-                r#","kind":"full""#,
+                r#","profile":"full""#,
             ))
             .await
             .unwrap(),
@@ -599,7 +619,7 @@ async fn conflicting_key_for_same_sub_is_opaque_401() {
             "/v1/enroll",
             &client_invite(&nonce, &OTHER_SEED),
             &OTHER_SEED,
-            r#","kind":"full""#,
+            r#","profile":"full""#,
         ))
         .await
         .unwrap(),
@@ -657,7 +677,7 @@ async fn re_enroll_over_legacy_unsigned_approved_takes_slow_path() {
             "/v1/enroll",
             &client_invite(&nonce, &CLIENT_SEED),
             &CLIENT_SEED,
-            r#","kind":"full""#,
+            r#","profile":"full""#,
         ))
         .await
         .unwrap(),
@@ -686,9 +706,14 @@ async fn stale_invite_nonce_is_opaque_401() {
     let cb = client_invite(&stale, &CLIENT_SEED);
     store.rotate_invite().await.unwrap(); // current nonce moves on
     let (status, _) = parts(
-        app.oneshot(signed("/v1/enroll", &cb, &CLIENT_SEED, r#","kind":"full""#))
-            .await
-            .unwrap(),
+        app.oneshot(signed(
+            "/v1/enroll",
+            &cb,
+            &CLIENT_SEED,
+            r#","profile":"full""#,
+        ))
+        .await
+        .unwrap(),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -701,9 +726,14 @@ async fn enroll_pop_by_wrong_key_is_opaque_401() {
     // cnf bound to CLIENT_SEED, but the request is signed by OTHER_SEED.
     let cb = client_invite(&nonce, &CLIENT_SEED);
     let (status, _) = parts(
-        app.oneshot(signed("/v1/enroll", &cb, &OTHER_SEED, r#","kind":"full""#))
-            .await
-            .unwrap(),
+        app.oneshot(signed(
+            "/v1/enroll",
+            &cb,
+            &OTHER_SEED,
+            r#","profile":"full""#,
+        ))
+        .await
+        .unwrap(),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -750,7 +780,12 @@ async fn gates_carry_tpc_but_credential_does_not() {
     // enroll → ticket, which carries its own (exchange-gate) TPC.
     let (status, body) = parts(
         app.clone()
-            .oneshot(signed("/v1/enroll", &cb, &CLIENT_SEED, r#","kind":"full""#))
+            .oneshot(signed(
+                "/v1/enroll",
+                &cb,
+                &CLIENT_SEED,
+                r#","profile":"full""#,
+            ))
             .await
             .unwrap(),
     )
@@ -967,7 +1002,12 @@ async fn volume_ro_intermediate(app: &axum::Router, store: &Store) -> Macaroon {
     let cb = client_invite(&nonce, &CLIENT_SEED);
     let (status, body) = parts(
         app.clone()
-            .oneshot(signed("/v1/enroll", &cb, &CLIENT_SEED, r#","kind":"full""#))
+            .oneshot(signed(
+                "/v1/enroll",
+                &cb,
+                &CLIENT_SEED,
+                r#","profile":"full""#,
+            ))
             .await
             .unwrap(),
     )
@@ -1094,12 +1134,12 @@ async fn durable_intermediate_is_not_usable_at_assume_role() {
     );
 }
 
-/// `kind` is required and fail-closed: an enroll body that omits it is a
+/// `profile` is required and fail-closed: an enroll body that omits it is a
 /// `400`, never silently defaulted to a wider grant
-/// (`docs/enroll-kinds.md`). The auth gates have already cleared at this
+/// (`docs/enroll-profiles.md`). The auth gates have already cleared at this
 /// point, so this is a request-shape `400`, not an opaque `401`.
 #[tokio::test]
-async fn enroll_without_kind_is_400() {
+async fn enroll_without_profile_is_400() {
     let (app, _a, store, _dir) = app().await;
     let nonce = store.current_invite().await.unwrap();
     let cb = client_invite(&nonce, &CLIENT_SEED);
@@ -1112,11 +1152,11 @@ async fn enroll_without_kind_is_400() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
-/// A kind the mint does not configure is refused the same way an absent
-/// one is — mint owns the kind → grant map, so an enrollee cannot invent
+/// A profile the mint does not configure is refused the same way an absent
+/// one is — mint owns the profile → grant map, so an enrollee cannot invent
 /// a privilege class by naming one.
 #[tokio::test]
-async fn enroll_with_unknown_kind_is_400() {
+async fn enroll_with_unknown_profile_is_400() {
     let (app, _a, store, _dir) = app().await;
     let nonce = store.current_invite().await.unwrap();
     let cb = client_invite(&nonce, &CLIENT_SEED);
@@ -1125,7 +1165,7 @@ async fn enroll_with_unknown_kind_is_400() {
             "/v1/enroll",
             &cb,
             &CLIENT_SEED,
-            r#","kind":"bogus""#,
+            r#","profile":"bogus""#,
         ))
         .await
         .unwrap(),
@@ -1138,7 +1178,7 @@ async fn enroll_with_unknown_kind_is_400() {
 /// exchanges fine, but asking to exchange `volume-rw` is refused with
 /// `422` — the structural backstop that keeps a read-only enrollment from
 /// reaching a writing role even if its client asks
-/// (`docs/enroll-kinds.md`). `422` is outside the `{200, 401, 403}` the
+/// (`docs/enroll-profiles.md`). `422` is outside the `{200, 401, 403}` the
 /// exchange client interprets, so a client past its grant fails loudly.
 #[tokio::test]
 async fn exchange_role_outside_grant_is_422() {
@@ -1152,7 +1192,7 @@ async fn exchange_role_outside_grant_is_422() {
                 "/v1/enroll",
                 &cb,
                 &CLIENT_SEED,
-                r#","kind":"readonly""#,
+                r#","profile":"readonly""#,
             ))
             .await
             .unwrap(),

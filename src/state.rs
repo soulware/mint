@@ -194,12 +194,12 @@ struct CachedInvite {
 pub struct Pending {
     /// The self-asserted `cnf` value (`ed25519:<b64 pub>`).
     pub pubkey: String,
-    /// The enrollment kind the enrollee declared at `/v1/enroll`
-    /// (`docs/enroll-kinds.md`) — the selector for the role set this
+    /// The enrollment profile the enrollee declared at `/v1/enroll`
+    /// (`docs/enroll-profiles.md`) — the selector for the role set this
     /// enrollment may exchange. Carried here so the operator sees it in
     /// `mint enroll list` and ratifies it at `approve`, where it is
     /// copied onto the [`Enrolled`] record under that record's MAC.
-    pub kind: String,
+    pub profile: String,
     /// The invite nonce this enrollment was opened under; rotation
     /// drops records whose nonce is no longer current.
     pub invite: String,
@@ -231,12 +231,12 @@ pub struct Enrolled {
     /// rejected ([`StateError::Conflict`]) — a key change goes through an
     /// explicit operator `revoke` first, not a re-enroll.
     pub pubkey: String,
-    /// The enrollment kind the operator ratified at approval
-    /// (`docs/enroll-kinds.md`). At `/v1/enroll-exchange` mint resolves
-    /// this against `config.enroll_kinds` and refuses any role outside
+    /// The enrollment profile the operator ratified at approval
+    /// (`docs/enroll-profiles.md`). At `/v1/enroll-exchange` mint resolves
+    /// this against `config.enroll_profiles` and refuses any role outside
     /// the granted set. Part of the body MAC, so a bucket-level writer
-    /// cannot widen the grant by swapping the kind without breaking it.
-    pub kind: String,
+    /// cannot widen the grant by swapping the profile without breaking it.
+    pub profile: String,
     /// The approving operator's `Subject`, taken from the admin-plane
     /// discharge at `mint enroll approve` — *who* confirmed the key
     /// (`docs/design-mint.md` § *Enrollment* (2)). Part of the body MAC.
@@ -383,11 +383,11 @@ pub struct EnrollmentView {
     pub sub: String,
     pub state: EnrollmentState,
     pub pubkey: String,
-    /// The enrollment kind (`docs/enroll-kinds.md`) the enrollee
+    /// The enrollment profile (`docs/enroll-profiles.md`) the enrollee
     /// declared / the operator ratified — the privilege class shown in
     /// `mint enroll list` and at the `approve` prompt. Empty for a
     /// `Revoked` tombstone row (it keeps no grant).
-    pub kind: String,
+    pub profile: String,
     /// Short, stable fingerprint of the bound key for the operator's
     /// side-channel comparison (the client prints the same).
     pub fingerprint: String,
@@ -442,8 +442,8 @@ const REVOKED_DOMAIN: &[u8] = b"mint-revoked-v1";
 /// different `<sub>` and still verify (cross-record substitution).
 /// `rev_epoch` is covered so a bucket writer cannot roll the epoch back
 /// to revive a revoked generation's credentials without breaking the
-/// MAC. `kind` is covered so the granted role set cannot be widened
-/// after the operator ratified it (`docs/enroll-kinds.md`). Every
+/// MAC. `profile` is covered so the granted role set cannot be widened
+/// after the operator ratified it (`docs/enroll-profiles.md`). Every
 /// variable-length field is length-prefixed to prevent canonicalization
 /// ambiguity.
 #[allow(clippy::too_many_arguments)]
@@ -454,7 +454,7 @@ fn approval_mac(
     approved_by: &str,
     approved_at: &str,
     fingerprint_shown: &str,
-    kind: &str,
+    profile: &str,
     rev_epoch: u64,
 ) -> blake3::Hash {
     let mut msg = Vec::new();
@@ -464,7 +464,7 @@ fn approval_mac(
     append_len_prefixed(&mut msg, approved_by.as_bytes());
     append_len_prefixed(&mut msg, approved_at.as_bytes());
     append_len_prefixed(&mut msg, fingerprint_shown.as_bytes());
-    append_len_prefixed(&mut msg, kind.as_bytes());
+    append_len_prefixed(&mut msg, profile.as_bytes());
     msg.extend_from_slice(&rev_epoch.to_be_bytes());
     blake3::keyed_hash(key, &msg)
 }
@@ -1003,7 +1003,7 @@ impl Store {
         &self,
         sub: &str,
         pubkey: &str,
-        kind: &str,
+        profile: &str,
         invite: &str,
         requested_by: &str,
         peer_ip: &str,
@@ -1039,7 +1039,7 @@ impl Store {
         }
         let rec = Pending {
             pubkey: pubkey.to_string(),
-            kind: kind.to_string(),
+            profile: profile.to_string(),
             invite: invite.to_string(),
             requested_by: requested_by.to_string(),
             first_seen: now_unix,
@@ -1085,7 +1085,7 @@ impl Store {
         &self,
         sub: &str,
         pubkey: &str,
-        kind: &str,
+        profile: &str,
         approved_by: &str,
         now_iso8601: &str,
     ) -> Result<(), StateError> {
@@ -1126,12 +1126,12 @@ impl Store {
             approved_by,
             now_iso8601,
             &fingerprint_shown,
-            kind,
+            profile,
             rev_epoch,
         );
         let rec = Enrolled {
             pubkey: pubkey.to_string(),
-            kind: kind.to_string(),
+            profile: profile.to_string(),
             approved_by: approved_by.to_string(),
             approved_at: now_iso8601.to_string(),
             fingerprint_shown,
@@ -1300,7 +1300,7 @@ impl Store {
             &rec.approved_by,
             &rec.approved_at,
             &rec.fingerprint_shown,
-            &rec.kind,
+            &rec.profile,
             rec.rev_epoch,
         );
         let actual = blake3::Hash::from_hex(&rec.mac).map_err(|_| StateError::Corrupt)?;
@@ -1439,7 +1439,7 @@ impl Store {
             &rec.approved_by,
             &rec.approved_at,
             &rec.fingerprint_shown,
-            &rec.kind,
+            &rec.profile,
             rec.rev_epoch,
         );
         let actual = match blake3::Hash::from_hex(&rec.mac) {
@@ -1456,12 +1456,12 @@ impl Store {
             &rec.approved_by,
             &rec.approved_at,
             &rec.fingerprint_shown,
-            &rec.kind,
+            &rec.profile,
             rec.rev_epoch,
         );
         let next = Enrolled {
             pubkey: rec.pubkey,
-            kind: rec.kind,
+            profile: rec.profile,
             approved_by: rec.approved_by,
             approved_at: rec.approved_at,
             fingerprint_shown: rec.fingerprint_shown,
@@ -1555,7 +1555,7 @@ impl Store {
                 &rec.approved_by,
                 &rec.approved_at,
                 &rec.fingerprint_shown,
-                &rec.kind,
+                &rec.profile,
                 rec.rev_epoch,
             );
             let actual = match blake3::Hash::from_hex(&rec.mac) {
@@ -1586,12 +1586,12 @@ impl Store {
                 &rec.approved_by,
                 &rec.approved_at,
                 &rec.fingerprint_shown,
-                &rec.kind,
+                &rec.profile,
                 rec.rev_epoch,
             );
             let next = Enrolled {
                 pubkey: rec.pubkey,
-                kind: rec.kind,
+                profile: rec.profile,
                 approved_by: rec.approved_by,
                 approved_at: rec.approved_at,
                 fingerprint_shown: rec.fingerprint_shown,
@@ -1776,7 +1776,7 @@ impl Store {
                 sub: sub.clone(),
                 state: EnrollmentState::Pending,
                 pubkey: p.pubkey.clone(),
-                kind: p.kind.clone(),
+                profile: p.profile.clone(),
                 fingerprint: fingerprint(&p.pubkey),
                 peer_ip: Some(p.peer_ip.clone()),
                 age_seconds: now_unix.saturating_sub(p.first_seen),
@@ -1795,7 +1795,7 @@ impl Store {
                 sub: sub.clone(),
                 state: EnrollmentState::Enrolled,
                 pubkey: a.pubkey.clone(),
-                kind: a.kind.clone(),
+                profile: a.profile.clone(),
                 fingerprint: a.fingerprint_shown.clone(),
                 peer_ip: None,
                 age_seconds: age,
@@ -1813,7 +1813,7 @@ impl Store {
                 sub: sub.clone(),
                 state: EnrollmentState::Revoked,
                 pubkey: String::new(),
-                kind: String::new(),
+                profile: String::new(),
                 fingerprint: String::new(),
                 peer_ip: None,
                 age_seconds: age,
@@ -1890,10 +1890,10 @@ mod tests {
     const PUBA: &str = "ed25519:AAAA";
     const PUBB: &str = "ed25519:BBBB";
     const APPROVED_AT: &str = "2026-05-23T12:00:00Z";
-    /// An arbitrary enrollment kind for the state-layer tests. The store
-    /// stores and MAC-covers it verbatim; resolving a kind to its
-    /// granted role set is the HTTP layer's job (`docs/enroll-kinds.md`).
-    const KIND: &str = "client";
+    /// An arbitrary enrollment profile for the state-layer tests. The store
+    /// stores and MAC-covers it verbatim; resolving a profile to its
+    /// granted role set is the HTTP layer's job (`docs/enroll-profiles.md`).
+    const PROFILE: &str = "client";
 
     #[tokio::test]
     async fn k_m_a_generated_on_first_start_with_demo_enabled() {
@@ -2183,7 +2183,7 @@ mod tests {
     async fn rotate_changes_nonce_and_drops_noncurrent_pending() {
         let (_d, s) = store().await;
         let old = s.current_invite().await.unwrap();
-        s.record_pending("01ARZ", PUBA, KIND, &old, "usr_op", "1.2.3.4", 100)
+        s.record_pending("01ARZ", PUBA, PROFILE, &old, "usr_op", "1.2.3.4", 100)
             .await
             .unwrap();
         let new = s.rotate_invite().await.unwrap();
@@ -2198,10 +2198,10 @@ mod tests {
     async fn rotate_does_not_touch_enrolled_registry() {
         let (_d, s) = store().await;
         let b = s.current_invite().await.unwrap();
-        s.record_pending("01ARZ", PUBA, KIND, &b, "usr_op", "ip", 1)
+        s.record_pending("01ARZ", PUBA, PROFILE, &b, "usr_op", "ip", 1)
             .await
             .unwrap();
-        s.approve("01ARZ", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("01ARZ", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         s.rotate_invite().await.unwrap();
@@ -2216,20 +2216,20 @@ mod tests {
         let (_d, s) = store().await;
         let b = s.current_invite().await.unwrap();
         assert_eq!(
-            s.record_pending("01ARZ", PUBA, KIND, &b, "usr_op", "ip", 1)
+            s.record_pending("01ARZ", PUBA, PROFILE, &b, "usr_op", "ip", 1)
                 .await
                 .unwrap(),
             Recorded::Created
         );
         assert_eq!(
-            s.record_pending("01ARZ", PUBA, KIND, &b, "usr_op", "ip2", 9)
+            s.record_pending("01ARZ", PUBA, PROFILE, &b, "usr_op", "ip2", 9)
                 .await
                 .unwrap(),
             Recorded::Idempotent
         );
         assert_eq!(s.get_pending("01ARZ").await.unwrap().unwrap().first_seen, 1);
         assert!(matches!(
-            s.record_pending("01ARZ", PUBB, KIND, &b, "usr_op", "ip", 1)
+            s.record_pending("01ARZ", PUBB, PROFILE, &b, "usr_op", "ip", 1)
                 .await,
             Err(StateError::Conflict)
         ));
@@ -2239,15 +2239,15 @@ mod tests {
     async fn fast_path_skips_pending_when_approved_pub_matches() {
         let (_d, s) = store().await;
         let b = s.current_invite().await.unwrap();
-        s.record_pending("01ARZ", PUBA, KIND, &b, "usr_op", "ip", 1)
+        s.record_pending("01ARZ", PUBA, PROFILE, &b, "usr_op", "ip", 1)
             .await
             .unwrap();
-        s.approve("01ARZ", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("01ARZ", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         // Re-enroll with the same pub — the fast path kicks in.
         assert_eq!(
-            s.record_pending("01ARZ", PUBA, KIND, &b, "usr_op", "ip", 2)
+            s.record_pending("01ARZ", PUBA, PROFILE, &b, "usr_op", "ip", 2)
                 .await
                 .unwrap(),
             Recorded::AlreadyEnrolled
@@ -2262,15 +2262,15 @@ mod tests {
     async fn different_key_on_live_enrollment_is_rejected_until_revoke() {
         let (_d, s) = store().await;
         let b = s.current_invite().await.unwrap();
-        s.record_pending("01ARZ", PUBA, KIND, &b, "usr_op", "ip", 1)
+        s.record_pending("01ARZ", PUBA, PROFILE, &b, "usr_op", "ip", 1)
             .await
             .unwrap();
-        s.approve("01ARZ", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("01ARZ", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         // Same sub, different pub — rejected (no silent in-place swap).
         assert!(matches!(
-            s.record_pending("01ARZ", PUBB, KIND, &b, "usr_op", "ip", 2)
+            s.record_pending("01ARZ", PUBB, PROFILE, &b, "usr_op", "ip", 2)
                 .await,
             Err(StateError::Conflict)
         ));
@@ -2283,12 +2283,12 @@ mod tests {
         // above the tombstone high-water.
         s.revoke("01ARZ", "usr_rev", APPROVED_AT).await.unwrap();
         assert_eq!(
-            s.record_pending("01ARZ", PUBB, KIND, &b, "usr_op", "ip", 3)
+            s.record_pending("01ARZ", PUBB, PROFILE, &b, "usr_op", "ip", 3)
                 .await
                 .unwrap(),
             Recorded::Created
         );
-        s.approve("01ARZ", PUBB, KIND, "usr_op", APPROVED_AT)
+        s.approve("01ARZ", PUBB, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         let enrolled = s.get_enrolled("01ARZ").await.unwrap().unwrap();
@@ -2300,10 +2300,10 @@ mod tests {
     async fn approve_writes_registry_and_deletes_pending() {
         let (_d, s) = store().await;
         let b = s.current_invite().await.unwrap();
-        s.record_pending("01ARZ", PUBA, KIND, &b, "usr_op", "ip", 1)
+        s.record_pending("01ARZ", PUBA, PROFILE, &b, "usr_op", "ip", 1)
             .await
             .unwrap();
-        s.approve("01ARZ", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("01ARZ", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         assert!(s.get_enrolled("01ARZ").await.unwrap().is_some());
@@ -2312,7 +2312,7 @@ mod tests {
             "pending deleted at approval"
         );
         // Re-approval is idempotent at the registry level.
-        s.approve("01ARZ", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("01ARZ", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         assert!(s.get_enrolled("01ARZ").await.unwrap().is_some());
@@ -2324,7 +2324,7 @@ mod tests {
         let b = s.current_invite().await.unwrap();
         for bad in ["../etc", "a/b", "", "."] {
             assert!(matches!(
-                s.record_pending(bad, PUBA, KIND, &b, "usr_op", "ip", 1)
+                s.record_pending(bad, PUBA, PROFILE, &b, "usr_op", "ip", 1)
                     .await,
                 Err(StateError::BadSub)
             ));
@@ -2335,13 +2335,13 @@ mod tests {
     async fn list_unifies_pending_and_enrolled_with_state_column() {
         let (_d, s) = store().await;
         let b = s.current_invite().await.unwrap();
-        s.record_pending("subP", PUBA, KIND, &b, "usr_op", "ip", 1)
+        s.record_pending("subP", PUBA, PROFILE, &b, "usr_op", "ip", 1)
             .await
             .unwrap();
-        s.record_pending("subQ", PUBB, KIND, &b, "usr_op", "ip", 1)
+        s.record_pending("subQ", PUBB, PROFILE, &b, "usr_op", "ip", 1)
             .await
             .unwrap();
-        s.approve("subQ", PUBB, KIND, "usr_op", APPROVED_AT)
+        s.approve("subQ", PUBB, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         let rows = s.list(10).await.unwrap();
@@ -2356,10 +2356,10 @@ mod tests {
     async fn list_shows_revoked_tombstone_as_revoked_row() {
         let (_d, s) = store().await;
         let b = s.current_invite().await.unwrap();
-        s.record_pending("subR", PUBA, KIND, &b, "usr_op", "ip", 1)
+        s.record_pending("subR", PUBA, PROFILE, &b, "usr_op", "ip", 1)
             .await
             .unwrap();
-        s.approve("subR", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("subR", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         s.revoke("subR", "usr_op", APPROVED_AT).await.unwrap();
@@ -2379,10 +2379,10 @@ mod tests {
     async fn list_flags_anomalous_shared_pub() {
         let (_d, s) = store().await;
         let b = s.current_invite().await.unwrap();
-        s.record_pending("subX", PUBA, KIND, &b, "usr_op", "ip", 1)
+        s.record_pending("subX", PUBA, PROFILE, &b, "usr_op", "ip", 1)
             .await
             .unwrap();
-        s.record_pending("subY", PUBA, KIND, &b, "usr_op", "ip", 1)
+        s.record_pending("subY", PUBA, PROFILE, &b, "usr_op", "ip", 1)
             .await
             .unwrap();
         let rows = s.list(10).await.unwrap();
@@ -2399,7 +2399,7 @@ mod tests {
         let s = Store::open_in_memory([1u8; 32]).await.unwrap();
         let inv = s.current_invite().await.unwrap();
         assert!(!inv.is_empty());
-        s.record_pending("01ARZ", PUBA, KIND, &inv, "usr_op", "ip", 1)
+        s.record_pending("01ARZ", PUBA, PROFILE, &inv, "usr_op", "ip", 1)
             .await
             .unwrap();
         assert!(s.get_pending("01ARZ").await.unwrap().is_some());
@@ -2440,7 +2440,7 @@ mod tests {
     #[tokio::test]
     async fn enrolled_record_round_trips_with_mac() {
         let (_d, s) = store().await;
-        s.approve("01ARZ", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("01ARZ", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         let got = s.get_enrolled("01ARZ").await.unwrap().expect("present");
@@ -2460,7 +2460,7 @@ mod tests {
             "approved_at": APPROVED_AT,
             "approved_by": "usr_op",
             "fingerprint_shown": fingerprint(PUBA),
-            "kind": KIND,
+            "profile": PROFILE,
             "kid": 0,
             "rev_epoch": 0,
             "mac": "00".repeat(32),
@@ -2492,7 +2492,7 @@ mod tests {
         raw_put_enrolled(&s, "01ARZ", &legacy_unsigned).await;
         let invite = s.current_invite().await.unwrap();
         let recorded = s
-            .record_pending("01ARZ", PUBA, KIND, &invite, "usr_op", "ip", 1)
+            .record_pending("01ARZ", PUBA, PROFILE, &invite, "usr_op", "ip", 1)
             .await
             .expect("record_pending must NOT error on corrupt approved");
         assert_eq!(recorded, Recorded::Created);
@@ -2513,7 +2513,7 @@ mod tests {
             "approved_at": APPROVED_AT,
             "approved_by": "usr_op",
             "fingerprint_shown": fingerprint(PUBA),
-            "kind": KIND,
+            "profile": PROFILE,
             "kid": 0,
             "rev_epoch": 0,
             "mac": "00".repeat(32),
@@ -2521,7 +2521,7 @@ mod tests {
         raw_put_enrolled(&s, "01ARZ", &forged).await;
         let invite = s.current_invite().await.unwrap();
         let recorded = s
-            .record_pending("01ARZ", PUBA, KIND, &invite, "usr_op", "ip", 1)
+            .record_pending("01ARZ", PUBA, PROFILE, &invite, "usr_op", "ip", 1)
             .await
             .expect("record_pending must NOT error on forged approved");
         assert_eq!(recorded, Recorded::Created);
@@ -2534,7 +2534,7 @@ mod tests {
         // a valid record verbatim from `_mint/clients/enrolled/subA` to
         // `_mint/clients/enrolled/subB` cannot replay it under the new sub.
         let (_d, s) = store().await;
-        s.approve("subA", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("subA", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         let real = s.get_enrolled("subA").await.unwrap().expect("present");
@@ -2554,7 +2554,7 @@ mod tests {
         // removed from the keyring.
         let d = tempfile::tempdir().unwrap();
         let s = Store::open_local(d.path()).await.unwrap();
-        s.approve("01ARZ", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("01ARZ", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         // Rotate the keyring on disk, then retire the original kid.
@@ -2576,7 +2576,7 @@ mod tests {
         // ring, because verification picks the key by kid.
         let d = tempfile::tempdir().unwrap();
         let s = Store::open_local(d.path()).await.unwrap();
-        s.approve("01ARZ", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("01ARZ", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         let mut kr = (*s.keyring().await).clone();
@@ -2608,7 +2608,7 @@ mod tests {
         // unchanged except for `kid` and `mac`; subsequent reads
         // verify under the new kid.
         let s = Store::open_in_memory([1u8; 32]).await.unwrap();
-        s.approve("01ARZ", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("01ARZ", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         s.set_keyring(ring_two_keys([1u8; 32], [2u8; 32])).await;
@@ -2631,7 +2631,7 @@ mod tests {
             "approved_at": APPROVED_AT,
             "approved_by": "usr_op",
             "fingerprint_shown": fingerprint(PUBA),
-            "kind": KIND,
+            "profile": PROFILE,
             "kid": 0,
             "rev_epoch": 0,
             "mac": "00".repeat(32),
@@ -2657,7 +2657,7 @@ mod tests {
         // first, skips the second, leaves the third alone.
         let d = tempfile::tempdir().unwrap();
         let s = Store::open_local(d.path()).await.unwrap();
-        s.approve("real-old", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("real-old", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         let forged = serde_json::json!({
@@ -2665,7 +2665,7 @@ mod tests {
             "approved_at": APPROVED_AT,
             "approved_by": "usr_op",
             "fingerprint_shown": fingerprint(PUBB),
-            "kind": KIND,
+            "profile": PROFILE,
             "kid": 0,
             "rev_epoch": 0,
             "mac": "00".repeat(32),
@@ -2677,7 +2677,7 @@ mod tests {
         s.set_keyring(kr).await;
         // A record approved AFTER the rotation already sits on the new
         // kid — the sweep should report it as already_current.
-        s.approve("on-current", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("on-current", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         let report = s.sweep_approvals_to_current_kid().await.unwrap();
@@ -2697,7 +2697,7 @@ mod tests {
         // {0, 1, 2} leaves records under 0 and 2 verifying as before.
         let d = tempfile::tempdir().unwrap();
         let s = Store::open_local(d.path()).await.unwrap();
-        s.approve("under-0", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("under-0", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         // Rotate to kid 1, approve a second record there.
@@ -2705,14 +2705,14 @@ mod tests {
         let rk = d.path().join("root_keys");
         kr.add_and_promote(&rk, None).unwrap();
         s.set_keyring(kr).await;
-        s.approve("under-1", PUBB, KIND, "usr_op", APPROVED_AT)
+        s.approve("under-1", PUBB, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         // Rotate again to kid 2, approve a third.
         let mut kr = (*s.keyring().await).clone();
         kr.add_and_promote(&rk, None).unwrap();
         s.set_keyring(kr).await;
-        s.approve("under-2", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("under-2", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         // Now retire only the intermediate kid 1. `under-0` and
@@ -2734,7 +2734,7 @@ mod tests {
         // forged or under a retired kid; that record is silently
         // dropped from the view (logged inside get_enrolled).
         let (_d, s) = store().await;
-        s.approve("good", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("good", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         let forged = serde_json::json!({
@@ -2742,7 +2742,7 @@ mod tests {
             "approved_at": APPROVED_AT,
             "approved_by": "usr_op",
             "fingerprint_shown": fingerprint(PUBB),
-            "kind": KIND,
+            "profile": PROFILE,
             "kid": 0,
             "rev_epoch": 0,
             "mac": "00".repeat(32),
@@ -2791,7 +2791,7 @@ mod tests {
     #[tokio::test]
     async fn fresh_approve_starts_at_epoch_zero() {
         let (_d, s) = store().await;
-        s.approve("01ARZ", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("01ARZ", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         let rec = s.get_enrolled("01ARZ").await.unwrap().expect("present");
@@ -2801,7 +2801,7 @@ mod tests {
     #[tokio::test]
     async fn revoke_writes_tombstone_and_deletes_enrolled() {
         let (_d, s) = store().await;
-        s.approve("01ARZ", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("01ARZ", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         let out = s.revoke("01ARZ", "usr_rev", APPROVED_AT).await.unwrap();
@@ -2819,11 +2819,11 @@ mod tests {
     #[tokio::test]
     async fn re_approve_after_revoke_bumps_epoch_and_clears_tombstone() {
         let (_d, s) = store().await;
-        s.approve("01ARZ", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("01ARZ", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         s.revoke("01ARZ", "usr_rev", APPROVED_AT).await.unwrap();
-        s.approve("01ARZ", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("01ARZ", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         let rec = s.get_enrolled("01ARZ").await.unwrap().expect("present");
@@ -2840,7 +2840,7 @@ mod tests {
     #[tokio::test]
     async fn revoke_is_idempotent_and_epoch_advances_each_cycle() {
         let (_d, s) = store().await;
-        s.approve("01ARZ", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("01ARZ", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         assert_eq!(
@@ -2853,7 +2853,7 @@ mod tests {
         assert_eq!(again.rev_epoch, 0);
         assert!(!again.was_enrolled);
         // Each approve/revoke cycle advances the high-water.
-        s.approve("01ARZ", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("01ARZ", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         assert_eq!(
@@ -2870,7 +2870,7 @@ mod tests {
         assert_eq!(out.rev_epoch, 0);
         assert!(s.get_revoked("ghost").await.unwrap().is_some());
         // A later first approval still resumes above the tombstone.
-        s.approve("ghost", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("ghost", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         assert_eq!(s.get_enrolled("ghost").await.unwrap().unwrap().rev_epoch, 1);
@@ -2881,7 +2881,7 @@ mod tests {
         let (_d, s) = store().await;
         let b = s.current_invite().await.unwrap();
         // A client that enrolled but was never approved.
-        s.record_pending("01ARZ", PUBA, KIND, &b, "usr_op", "ip", 0)
+        s.record_pending("01ARZ", PUBA, PROFILE, &b, "usr_op", "ip", 0)
             .await
             .unwrap();
         let out = s.revoke("01ARZ", "usr_rev", APPROVED_AT).await.unwrap();
@@ -2900,7 +2900,7 @@ mod tests {
     #[tokio::test]
     async fn revoke_without_a_pending_record_reports_none_removed() {
         let (_d, s) = store().await;
-        s.approve("01ARZ", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("01ARZ", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         let out = s.revoke("01ARZ", "usr_rev", APPROVED_AT).await.unwrap();
@@ -2916,7 +2916,7 @@ mod tests {
         // The tombstone MAC binds `sub`, so a verbatim copy to another
         // sub cannot revive the high-water there (cross-record forgery).
         let (_d, s) = store().await;
-        s.approve("subA", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("subA", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         s.revoke("subA", "usr_rev", APPROVED_AT).await.unwrap();
@@ -2944,7 +2944,7 @@ mod tests {
         // revive dead credentials.
         let d = tempfile::tempdir().unwrap();
         let s = Store::open_local(d.path()).await.unwrap();
-        s.approve("01ARZ", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("01ARZ", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         s.revoke("01ARZ", "usr_rev", APPROVED_AT).await.unwrap();
@@ -2964,7 +2964,7 @@ mod tests {
             .expect("survives retire");
         assert_eq!(tomb.kid, 1);
         // Re-approval still resumes above the surviving high-water.
-        s.approve("01ARZ", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("01ARZ", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
         assert_eq!(s.get_enrolled("01ARZ").await.unwrap().unwrap().rev_epoch, 1);
@@ -2985,10 +2985,10 @@ mod tests {
         let rk = d.path().join("root_keys");
 
         // Two clients enrolled under kid 0.
-        s.approve("01ARZ", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("01ARZ", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
-        s.approve("01BXY", PUBB, KIND, "usr_op", APPROVED_AT)
+        s.approve("01BXY", PUBB, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
 
@@ -3029,7 +3029,7 @@ mod tests {
         let s = Store::open_local(d.path()).await.unwrap();
         let rk = d.path().join("root_keys");
 
-        s.approve("01ARZ", PUBA, KIND, "usr_op", APPROVED_AT)
+        s.approve("01ARZ", PUBA, PROFILE, "usr_op", APPROVED_AT)
             .await
             .unwrap();
 

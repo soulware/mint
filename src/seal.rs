@@ -414,7 +414,7 @@ name = "volume-ro"
 ttl_seconds = 2592000
 policy_file = "volume-ro.json"
 
-[enroll.kinds]
+[enroll.profiles]
 client = ["volume-ro"]
 "#;
 
@@ -593,7 +593,7 @@ bucket = "demo-bucket"
 name = "coord-rw"
 ttl_seconds = 3600
 policy_file = "coord-rw.json"
-[enroll.kinds]
+[enroll.profiles]
 client = ["coord-rw"]
 "#;
 
@@ -641,7 +641,7 @@ location = "https://a.example/v1/discharge"
 name = "coord-rw"
 ttl_seconds = 3600
 policy_file = "coord-rw.json"
-[enroll.kinds]
+[enroll.profiles]
 client = ["coord-rw"]
 "#;
         let cfg = parse_for_test(

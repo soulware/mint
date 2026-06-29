@@ -43,7 +43,7 @@ ttl_seconds = 900
 policy_file = "volume-rw.json"
 tpc = { location = "https://auth.example/" }
 
-[enroll.kinds]
+[enroll.profiles]
 client = ["volume-rw"]
 "#;
 

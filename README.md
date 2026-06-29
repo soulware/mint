@@ -98,14 +98,14 @@ The mint cli includes a demonstration `client` sub-cmd to allow the enrollment f
 
 ```bash
 # Client begins the enrollment process, providing the <INVITE> from earlier.
-# `--kind` declares the privilege class to enrol as; mint maps it to the role
-# set this enrollment may exchange (see `[enroll.kinds]` in the config, and
-# docs/enroll-kinds.md). The demo config defines a `client` kind that grants
+# `--profile` declares the privilege class to enrol as; mint maps it to the role
+# set this enrollment may exchange (see `[enroll.profiles]` in the config, and
+# docs/enroll-profiles.md). The demo config defines a `client` profile that grants
 # both demo roles -
-./target/debug/mint client enroll --kind client demo-client <INVITE>
+./target/debug/mint client enroll --profile client demo-client <INVITE>
 
 # The operator can then approve the enrollment request. `enroll list` shows the
-# declared kind alongside the fingerprint, and `approve` ratifies it -
+# declared profile alongside the fingerprint, and `approve` ratifies it -
 ./target/debug/mint enroll list
 ./target/debug/mint enroll approve demo-client
 

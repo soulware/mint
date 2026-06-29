@@ -46,7 +46,7 @@ name = "volume-ro"
 ttl_seconds = 2592000
 policy_file = "volume-ro.json"
 
-[enroll.kinds]
+[enroll.profiles]
 client = ["volume-ro"]
 "#;
 
