@@ -29,8 +29,9 @@ name = "volume-ro"
 ttl_seconds = 2592000
 policy_file = "volume-ro.json"
 
-[enroll.profiles]
-client = ["volume-ro"]
+[[profile]]
+name = "client"
+roles = ["volume-ro"]
 "#;
 
 const POLICY: &str = r#"{"Version":"2012-10-17","Statement":[]}"#;

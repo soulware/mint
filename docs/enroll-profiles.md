@@ -13,13 +13,17 @@ This is mint's side of the cross-repo contract in
 
 ## The mapping is config-owned, the profile is client-declared
 
-Profiles live in `[enroll.profiles]` in `mint.toml`, each mapping a profile name
-to the roles it grants:
+Profiles are declared in `mint.toml` as top-level `[[profile]]` entries — a
+sibling catalog to `[[role]]` — each a `name` and the `roles` it grants:
 
 ```toml
-[enroll.profiles]
-coordinator = ["coord-ro", "coord-rw", "volume-rw", "volume-ro"]
-attestation = ["coord-ro"]
+[[profile]]
+name = "coordinator"
+roles = ["coord-ro", "coord-rw", "volume-rw", "volume-ro"]
+
+[[profile]]
+name = "attestation"
+roles = ["coord-ro"]
 ```
 
 The enrollee **declares** a profile; the mint operator **owns** what each
@@ -31,10 +35,10 @@ configured `[[role]]`s.
 
 Validation at config load:
 
-- `[enroll.profiles]` is **required and non-empty** — a mint with none can
-  enroll no one, so it fails closed at startup rather than at the first
+- at least one `[[profile]]` is **required** — a mint with none can enroll
+  no one, so it fails closed at startup rather than at the first
   `/v1/enroll`.
-- each profile grants at least one role, and
+- each profile name is unique and grants at least one role, and
 - every granted role is a configured `[[role]]`.
 
 ## The flow

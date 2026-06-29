@@ -45,8 +45,9 @@ name = "attested-write"
 ttl_seconds = 300
 policy_file = "attested-write.json"
 
-[enroll.profiles]
-client = ["attested-write"]
+[[profile]]
+name = "client"
+roles = ["attested-write"]
 "#;
 
 /// The shipped demo template: a literal bucket/prefix plus the caveat and

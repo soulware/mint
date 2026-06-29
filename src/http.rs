@@ -854,7 +854,7 @@ async fn enroll(State(state): State<AppState>, headers: HeaderMap, body: Bytes) 
     // request-shape error, not an auth failure, so it is `400` rather
     // than the opaque `401` the auth gates collapse to.
     let profile = match serde_json::from_slice::<EnrollBody>(&body) {
-        Ok(b) if state.config.enroll_profiles.contains_key(&b.profile) => b.profile,
+        Ok(b) if state.config.profiles.contains_key(&b.profile) => b.profile,
         _ => {
             audit("denied:profile", &caveats);
             return respond(
@@ -1183,7 +1183,7 @@ async fn enroll_exchange(
     // it.
     let granted = state
         .config
-        .enroll_profiles
+        .profiles
         .get(&enrolled_profile)
         .is_some_and(|roles| roles.iter().any(|r| r == &exch.role));
     if !granted {

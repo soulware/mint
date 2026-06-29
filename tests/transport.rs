@@ -42,8 +42,9 @@ name = "writer"
 ttl_seconds = 900
 policy_file = "writer.json"
 
-[enroll.profiles]
-client = ["writer"]
+[[profile]]
+name = "client"
+roles = ["writer"]
 "#;
 
 fn config() -> Config {

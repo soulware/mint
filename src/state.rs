@@ -233,7 +233,7 @@ pub struct Enrolled {
     pub pubkey: String,
     /// The enrollment profile the operator ratified at approval
     /// (`docs/enroll-profiles.md`). At `/v1/enroll-exchange` mint resolves
-    /// this against `config.enroll_profiles` and refuses any role outside
+    /// this against `config.profiles` and refuses any role outside
     /// the granted set. Part of the body MAC, so a bucket-level writer
     /// cannot widen the grant by swapping the profile without breaking it.
     pub profile: String,

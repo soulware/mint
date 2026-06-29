@@ -99,7 +99,7 @@ The mint cli includes a demonstration `client` sub-cmd to allow the enrollment f
 ```bash
 # Client begins the enrollment process, providing the <INVITE> from earlier.
 # `--profile` declares the privilege class to enrol as; mint maps it to the role
-# set this enrollment may exchange (see `[enroll.profiles]` in the config, and
+# set this enrollment may exchange (see the `[[profile]]` entries in the config, and
 # docs/enroll-profiles.md). The demo config defines a `client` profile that grants
 # both demo roles -
 ./target/debug/mint client enroll --profile client demo-client <INVITE>

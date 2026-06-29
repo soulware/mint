@@ -114,18 +114,24 @@ ttl_seconds = 900
 name = "demo-attested"
 ttl_seconds = 300
 
-# Enrollment profiles (docs/enroll-profiles.md). An enrollee declares a `profile`
-# at `mint client enroll --profile <name>`; mint maps it here to the role
-# set that enrollment may exchange, and the operator ratifies the profile at
+# Enrollment profiles (docs/enroll-profiles.md). A profile is a sibling of
+# [[role]] above: a named bundle of roles. An enrollee declares one at
+# `mint client enroll --profile <name>`; mint maps it to the role set that
+# enrollment may exchange, and the operator ratifies the profile at
 # `mint enroll approve`. The profile name space is the deployment's own —
 # mint coins none. Required and fail-closed: an enrollee whose `profile` is
 # absent or not listed here is refused at enroll, and `enroll-exchange`
 # refuses any role outside the granted set. At least one profile must be
 # declared.
-[enroll.profiles]
+
 # A full client may exchange either demo role.
-client = ["demo", "demo-attested"]
+[[profile]]
+name = "client"
+roles = ["demo", "demo-attested"]
+
 # A read-only enrollee (e.g. a dedicated attestation authority) is held to
 # the issuer-only role and can never exchange the attested one — the grant
 # is mint-enforced, not convention.
-readonly = ["demo"]
+[[profile]]
+name = "readonly"
+roles = ["demo"]

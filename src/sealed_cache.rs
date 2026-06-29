@@ -351,8 +351,9 @@ policy_file = "volume-ro.json"
 name = "volume-rw"
 ttl_seconds = 3600
 policy_file = "volume-rw.json"
-[enroll.profiles]
-client = ["volume-ro", "volume-rw"]
+[[profile]]
+name = "client"
+roles = ["volume-ro", "volume-rw"]
 "#;
         crate::config::parse_for_test(
             toml,

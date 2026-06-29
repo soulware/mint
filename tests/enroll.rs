@@ -61,9 +61,13 @@ name = "volume-rw"
 ttl_seconds = 900
 policy_file = "volume-rw.json"
 
-[enroll.profiles]
-full = ["volume-ro", "volume-rw"]
-readonly = ["volume-ro"]
+[[profile]]
+name = "full"
+roles = ["volume-ro", "volume-rw"]
+
+[[profile]]
+name = "readonly"
+roles = ["volume-ro"]
 "#;
 
 const VOLUME_RW_POLICY: &str = r#"{"Version":"2012-10-17","Statement":[]}"#;

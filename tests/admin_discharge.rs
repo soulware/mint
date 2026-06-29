@@ -74,8 +74,9 @@ ttl_seconds = 900
 policy_file = "volume-rw.json"
 tpc = { location = "https://auth.example/v1/discharge" }
 
-[enroll.profiles]
-client = ["volume-rw"]
+[[profile]]
+name = "client"
+roles = ["volume-rw"]
 "#;
 
 fn config() -> Config {

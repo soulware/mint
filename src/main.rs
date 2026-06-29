@@ -136,7 +136,7 @@ enum ClientCmd {
         /// Enrollment profile — the privilege class to enrol as. mint maps
         /// it to the role set this enrollment may exchange; the operator
         /// ratifies it at `enroll approve`. Must be a profile the target
-        /// mint configures under `[enroll.profiles]`.
+        /// mint configures (a `[[profile]]` entry).
         #[arg(long)]
         profile: String,
         /// Filename (under the client dir) to write the credential
