@@ -91,6 +91,8 @@ pub async fn run(
     minter: Arc<dyn KeypairMinter>,
     bind_override: Option<SocketAddr>,
 ) -> io::Result<()> {
+    tracing::info!(version = crate::VERSION, "mint starting");
+
     // admin service token (`docs/design-mint.md` § *Admin service token*):
     // the admin-plane primary + machine key the local operator CLI reads.
     // (Re)minted whenever either file is absent and an auth service is

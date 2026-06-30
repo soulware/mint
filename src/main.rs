@@ -25,7 +25,7 @@ use mint::tigris::TigrisMinter;
 
 #[derive(Parser)]
 #[command(
-    version = env!("MINT_VERSION"),
+    version = mint::VERSION,
     about = "mint: macaroon-authenticated scoped-credential vending for Tigris"
 )]
 struct Args {

@@ -60,7 +60,10 @@ pub struct AppState {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/healthz", get(|| async { "ok" }))
+        .route(
+            "/healthz",
+            get(|| async { axum::Json(json!({"status": "ok", "version": crate::VERSION})) }),
+        )
         .route("/readyz", get(readyz))
         .route("/v1/assume-role", post(assume_role))
         .route("/v1/enroll", post(enroll))
@@ -73,7 +76,8 @@ pub fn router(state: AppState) -> Router {
 /// Readiness probe. `200 ready` once a canonical seal is being served;
 /// `503 not sealed` while dormant, so an orchestrator holds a dormant
 /// host out of rotation until an operator seals it.
-/// Liveness (`/healthz`) is seal-independent and always `ok`.
+/// Liveness (`/healthz`) is seal-independent and always `200`, returning
+/// `{"status":"ok","version":<build version>}`.
 async fn readyz(State(state): State<AppState>) -> Response {
     match state.seal.load().as_ref() {
         SealState::Serving(_) => (StatusCode::OK, "ready").into_response(),
