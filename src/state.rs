@@ -1254,9 +1254,17 @@ impl Store {
         match self.objects.get(&Self::pending_key(sub)).await {
             Ok(g) => {
                 let bytes = g.bytes().await?;
-                serde_json::from_slice(&bytes)
-                    .map(Some)
-                    .map_err(|_| StateError::Corrupt)
+                match serde_json::from_slice(&bytes) {
+                    Ok(p) => Ok(Some(p)),
+                    Err(_) => {
+                        tracing::warn!(
+                            target: "mint::state",
+                            sub,
+                            "pending record failed to deserialize; treating as corrupt"
+                        );
+                        Err(StateError::Corrupt)
+                    }
+                }
             }
             Err(OsError::NotFound { .. }) => Ok(None),
             Err(e) => Err(e.into()),
@@ -1282,7 +1290,14 @@ impl Store {
             Err(OsError::NotFound { .. }) => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        let rec: Enrolled = serde_json::from_slice(&bytes).map_err(|_| StateError::Corrupt)?;
+        let rec: Enrolled = serde_json::from_slice(&bytes).map_err(|_| {
+            tracing::warn!(
+                target: "mint::state",
+                sub,
+                "enrolled record failed to deserialize; treating as corrupt"
+            );
+            StateError::Corrupt
+        })?;
         let kr = self.keyring().await;
         let Some(key) = kr.get(rec.kid) else {
             tracing::warn!(
@@ -1332,7 +1347,14 @@ impl Store {
             Err(OsError::NotFound { .. }) => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        let rec: Revoked = serde_json::from_slice(&bytes).map_err(|_| StateError::Corrupt)?;
+        let rec: Revoked = serde_json::from_slice(&bytes).map_err(|_| {
+            tracing::warn!(
+                target: "mint::state",
+                sub,
+                "tombstone failed to deserialize; treating as corrupt"
+            );
+            StateError::Corrupt
+        })?;
         let kr = self.keyring().await;
         let Some(key) = kr.get(rec.kid) else {
             tracing::warn!(
@@ -1732,8 +1754,16 @@ impl Store {
         let pending_subs = self.pending_subs().await?;
         let mut pendings: Vec<(String, Pending)> = Vec::new();
         for sub in pending_subs {
-            if let Some(p) = self.get_pending(&sub).await? {
-                pendings.push((sub, p));
+            match self.get_pending(&sub).await {
+                Ok(Some(p)) => pendings.push((sub, p)),
+                Ok(None) => {}
+                // A corrupt pending record (e.g. one written under an
+                // older on-disk schema) drops out of the view rather than
+                // failing the whole list — already logged in get_pending,
+                // and the same tolerance record_pending/approve/
+                // rotate_invite already give an unreadable pending record.
+                Err(StateError::Forged | StateError::Corrupt) => {}
+                Err(e) => return Err(e),
             }
         }
         let enrolled_subs = self.enrolled_subs().await?;
@@ -1742,13 +1772,13 @@ impl Store {
             match self.get_enrolled(&sub).await {
                 Ok(Some(a)) => enrolleds.push((sub, a)),
                 Ok(None) => {}
-                // A forged or retired-kid entry must not poison the
-                // whole `mint enroll list` view — it has already been
-                // logged inside `get_enrolled`. Skipping it here is
-                // consistent with the HTTP layer's "treat as absent"
-                // policy and matches what the operator would otherwise
-                // see if they retried after the bad record was cleared.
-                Err(StateError::Forged) => {}
+                // A forged or corrupt entry must not poison the whole
+                // `mint enroll list` view — both are logged inside
+                // `get_enrolled`. Skipping it here is consistent with the
+                // HTTP layer's "treat as absent" policy and matches what
+                // the operator would otherwise see if they retried after
+                // the bad record was cleared.
+                Err(StateError::Forged | StateError::Corrupt) => {}
                 Err(e) => return Err(e),
             }
         }
@@ -1759,10 +1789,10 @@ impl Store {
             match self.get_revoked(&sub).await {
                 Ok(Some(r)) => revokeds.push((sub, r)),
                 Ok(None) => {}
-                // A forged tombstone is skipped for the same reason a
-                // forged enrolled record is — already logged, treat as
-                // absent rather than poisoning the whole view.
-                Err(StateError::Forged) => {}
+                // A forged or corrupt tombstone is skipped for the same
+                // reason a forged enrolled record is — already logged,
+                // treat as absent rather than poisoning the whole view.
+                Err(StateError::Forged | StateError::Corrupt) => {}
                 Err(e) => return Err(e),
             }
         }
@@ -2435,6 +2465,61 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    async fn raw_put_pending(store: &Store, sub: &str, body: &serde_json::Value) {
+        let key = Store::pending_key(sub);
+        let bytes = serde_json::to_vec(body).unwrap();
+        store
+            .objects
+            .put_opts(
+                &key,
+                PutPayload::from(Bytes::from(bytes)),
+                PutOptions::default(),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_skips_corrupt_records_without_failing() {
+        // A record written under an older on-disk schema (here, the
+        // pre-rename `kind` field where the current struct wants
+        // `profile`) fails to deserialize. Such a record must drop out of
+        // the `mint enroll list` view, never fail the whole list — the
+        // regression that took the admin plane down with a 503.
+        let (_d, s) = store().await;
+        s.approve("good", PUBA, PROFILE, "usr_op", APPROVED_AT)
+            .await
+            .unwrap();
+        // Old-schema enrolled record: `kind` where the struct wants `profile`.
+        let old_enrolled = serde_json::json!({
+            "pubkey": PUBB,
+            "approved_at": APPROVED_AT,
+            "approved_by": "usr_op",
+            "fingerprint_shown": fingerprint(PUBB),
+            "kind": "client",
+            "kid": 0,
+            "rev_epoch": 0,
+            "mac": "00".repeat(32),
+        });
+        raw_put_enrolled(&s, "old-enrolled", &old_enrolled).await;
+        // Old-schema pending record: same rename gap.
+        let old_pending = serde_json::json!({
+            "pubkey": PUBA,
+            "kind": "client",
+            "invite": "n",
+            "requested_by": "usr_op",
+            "first_seen": 1,
+            "peer_ip": "ip",
+        });
+        raw_put_pending(&s, "old-pending", &old_pending).await;
+
+        let rows = s.list(0).await.expect("list tolerates corrupt records");
+        let subs: Vec<&str> = rows.iter().map(|r| r.sub.as_str()).collect();
+        assert!(subs.contains(&"good"));
+        assert!(!subs.contains(&"old-enrolled"), "corrupt enrolled skipped");
+        assert!(!subs.contains(&"old-pending"), "corrupt pending skipped");
     }
 
     #[tokio::test]
