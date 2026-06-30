@@ -13,6 +13,12 @@
 //! prototype ships [`iam::FakeMinter`] so the whole flow runs without a
 //! live account.
 
+/// The release version, baked in at build time by `build.rs` (the git tag
+/// via `MINT_VERSION`) — the same string `mint --version` reports. Surfaced
+/// in the startup log and on `/healthz` so a running instance is
+/// identifiable without shelling in.
+pub const VERSION: &str = env!("MINT_VERSION");
+
 pub mod admin;
 pub mod attest;
 pub mod audit;

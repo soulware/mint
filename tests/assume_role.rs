@@ -509,14 +509,20 @@ async fn dormant_closes_assume_role_and_readiness() {
         .await
         .unwrap();
     assert_eq!(ready.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let live = app
-        .oneshot(
+    let (live_status, live_body) = body_string(
+        app.oneshot(
             Request::builder()
                 .uri("/healthz")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
-        .unwrap();
-    assert_eq!(live.status(), StatusCode::OK);
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(live_status, StatusCode::OK);
+    // Liveness carries the build version so a running instance is
+    // identifiable without shelling in.
+    assert!(live_body.contains("\"status\":\"ok\""), "body: {live_body}");
+    assert!(live_body.contains("\"version\""), "body: {live_body}");
 }
