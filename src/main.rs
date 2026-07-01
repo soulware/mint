@@ -445,21 +445,14 @@ async fn open_store(cfg: &Config) -> Result<(Store, TigrisHandles), Box<dyn std:
             store.init_k_session(&cfg.data_dir)?;
         }
     }
-    // K_M-B is needed when a role carries an attested third-party caveat
-    // to stamp, or when mint colocates the demo attestation authority.
-    // Like the other secrets, demo mode generates it locally — for a
-    // co-located attestation authority (which reads the same file) or
-    // the demo authority alike; a production mint has it provisioned
-    // out-of-band by its attestation authority.
-    let attest_demo = cfg.demo_attestation.is_some();
-    if cfg.roles.values().any(|r| r.is_attested()) || attest_demo {
-        // `[attestation.demo].k_m_b`, when set, is the distributed-demo shared
-        // secret — used verbatim so mint matches the attestation coordinator's
-        // copy (mirrors the K_M-A path above).
-        let prov = KeyProvisioning::resolve(
-            cfg.demo_attestation.as_ref().and_then(|d| d.k_m_b),
-            demo_enabled,
-        );
+    // K_M-B is needed when a role carries an attested third-party caveat to
+    // stamp. `[attestation].k_m_b`, when set, is the shared secret — used
+    // verbatim so mint matches the attestation authority's copy (mirrors the
+    // K_M-A path above). Omitted, demo mode generates it locally; a
+    // production mint has it provisioned out-of-band by its attestation
+    // authority.
+    if cfg.roles.values().any(|r| r.is_attested()) {
+        let prov = KeyProvisioning::resolve(cfg.attestation_k_m_b, demo_enabled);
         store.init_k_m_b(&cfg.data_dir, prov)?;
     }
     Ok((
@@ -554,9 +547,9 @@ fn resolve_login_transport(
 
 /// `mint login` — authenticate at the auth role and persist the per-user
 /// session + transport that gate `/v1/discharge` for both planes. A
-/// `--config` colocating the demo attestation authority also persists
-/// that authority's transport, so `assume-role` can fetch attestation
-/// discharges without further flags.
+/// `--config` that sets `[attestation].location` also persists the
+/// attestation authority's transport (its base URL), so `exchange` can fetch
+/// attestation discharges without further flags.
 async fn login(
     url: Option<String>,
     config: Option<PathBuf>,
@@ -566,12 +559,11 @@ async fn login(
     let transport = resolve_login_transport(url, cfg.as_ref())?;
     let session = mint::session::login(&transport, subject).await?;
     mint::session::save(&session, &transport)?;
-    if let Some(attest_socket) = cfg
+    if let Some(attest_transport) = cfg
         .as_ref()
-        .and_then(|c| c.demo_attestation.as_ref())
-        .map(|d| &d.socket)
+        .and_then(|c| c.attestation_location.as_deref())
+        .and_then(mint::tpc::location_base)
     {
-        let attest_transport = format!("unix:{}", attest_socket.display());
         mint::session::save_attest_transport(&attest_transport)?;
         eprintln!("attestation authority at {attest_transport} (transport saved)");
     }

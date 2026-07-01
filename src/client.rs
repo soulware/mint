@@ -561,12 +561,26 @@ pub async fn assume_role(
     Ok(text)
 }
 
+/// The `POST /v1/discharge` request body sent to the attestation
+/// authority — the client↔authority wire contract. The client proposes
+/// every non-reserved caveat the role's template substitutes as
+/// `{{caveat.X}}`; the authority vouches them into the discharge.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AttestRequest {
+    /// Base64url of the credential's attested third-party-caveat `CID`.
+    /// The authority decrypts it under `K_M-B` to recover the discharge
+    /// key `r` and the bound `(client_id, org_id, role)`.
+    cid: String,
+    /// The `(name, value)` pairs the discharge is to attest.
+    caveats: std::collections::BTreeMap<String, String>,
+}
+
 /// Fetch an attestation discharge for each third-party caveat on the
 /// credential, attesting the caller's `--attest` pairs. The session
 /// comes from the shared per-user login; the transport is the
-/// attestation authority's, saved by `mint login --config` against a
-/// config that colocates it. A credential with no TPC yields an empty
-/// list without touching either.
+/// attestation authority's, saved by `mint login --config` from the
+/// config's `[attestation].location`. A credential with no TPC yields an
+/// empty list without touching either.
 async fn attest_discharges(
     credential: &Macaroon,
     values: &[CaveatArg],
@@ -595,7 +609,7 @@ async fn attest_discharges(
             "  credential carries an attested caveat → fetching discharge \
              from {location} (via {transport})"
         );
-        let body = serde_json::to_string(&crate::attest::AttestRequest {
+        let body = serde_json::to_string(&AttestRequest {
             cid: BASE64.encode(cid),
             caveats: caveats.clone(),
         })

@@ -12,14 +12,50 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 
 use mint::audit::AuditLog;
+use mint::caveat::{Caveat, name};
 use mint::config::Config;
 use mint::http::{AppState, router};
 use mint::iam::FakeMinter;
 use mint::issuance::mint_invite;
 use mint::keyring::Keyring;
+use mint::macaroon::{KeyRef, mint_under_key_with_nonce};
 use mint::state::{K_M_A_FILE, KeyProvisioning, Store};
 
 mod common;
+
+/// A stand-in attestation authority over the transport seam: the same wire
+/// contract the reference client expects (`POST /v1/discharge`,
+/// `{cid, caveats}` → `{discharge}`), discharging by recovering `r` from the
+/// CID under `K_M-B` (`tpc::decrypt_cid_attested`) and minting rooted at it —
+/// exactly what the external authority (elide's coord B) does. Replaces the
+/// attestation authority mint used to colocate.
+fn stub_authority(k_m_b: [u8; 32]) -> axum::Router {
+    use axum::Json;
+    use axum::extract::State;
+    use base64::Engine as _;
+    use serde_json::Value;
+
+    async fn discharge(State(k_m_b): State<[u8; 32]>, Json(req): Json<Value>) -> Json<Value> {
+        let cid = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(req["cid"].as_str().expect("cid"))
+            .expect("cid base64url");
+        let pt = mint::tpc::decrypt_cid_attested(&k_m_b, &cid).expect("recover r from cid");
+        let mut cvs: Vec<Caveat> = req["caveats"]
+            .as_object()
+            .into_iter()
+            .flat_map(|m| m.iter())
+            .map(|(k, v)| Caveat::scalar(k, v.as_str().expect("caveat value")))
+            .collect();
+        cvs.push(Caveat::scalar(name::EXP, "2099999999"));
+        let mac =
+            mint_under_key_with_nonce(&pt.r, KeyRef::Discharge, mint::tpc::ticket_id(&cid), cvs);
+        Json(serde_json::json!({ "discharge": mac.encode() }))
+    }
+
+    axum::Router::new()
+        .route("/v1/discharge", axum::routing::post(discharge))
+        .with_state(k_m_b)
+}
 
 const ROOT: [u8; 32] = [42u8; 32];
 const K_M_A: [u8; 32] = [13u8; 32];
@@ -36,7 +72,6 @@ location = "https://auth.example/v1/discharge"
 [auth.demo]
 [attestation]
 location = "https://attest.example/v1/discharge"
-[attestation.demo]
 [[role]]
 name = "writer"
 ttl_seconds = 900
@@ -76,11 +111,13 @@ async fn full_flow_over_unix_socket() {
         .init_k_session(srv_dir.path())
         .expect("init k_session");
     // K_M-B keys the attested TPC the exchange stamps onto the `writer`
-    // credential, and the demo attestation authority's discharge route.
+    // credential; the stand-in authority recovers `r` from the CID under the
+    // same key.
     store_inner
         .init_k_m_b(srv_dir.path(), KeyProvisioning::GenerateIfAbsent)
         .expect("init k_m_b");
     let store = Arc::new(store_inner);
+    let k_m_b = *store.k_m_b().expect("k_m_b generated");
     let nonce = store.current_invite().await.expect("nonce");
     let cfg = config();
     let seal = Arc::new(arc_swap::ArcSwap::from_pointee(
@@ -109,13 +146,12 @@ async fn full_flow_over_unix_socket() {
     let auth_sock = srv_dir.path().join("auth.sock");
     let auth_listener = tokio::net::UnixListener::bind(&auth_sock).expect("bind auth uds");
     std::fs::set_permissions(&auth_sock, std::fs::Permissions::from_mode(0o666)).expect("chmod");
-    // The demo attestation authority on a third UDS: the client fetches
+    // A stand-in attestation authority on a third UDS: the client fetches
     // the `writer` credential's attestation discharge here.
     let attest_sock = srv_dir.path().join("attest.sock");
     let attest_listener = tokio::net::UnixListener::bind(&attest_sock).expect("bind attest uds");
     std::fs::set_permissions(&attest_sock, std::fs::Permissions::from_mode(0o666)).expect("chmod");
     let auth_state = state.clone();
-    let attest_state = state.clone();
     tokio::spawn(async move {
         axum::serve(listener, router(state)).await.expect("serve");
     });
@@ -125,7 +161,7 @@ async fn full_flow_over_unix_socket() {
             .expect("serve auth");
     });
     tokio::spawn(async move {
-        axum::serve(attest_listener, mint::attest::router(attest_state))
+        axum::serve(attest_listener, stub_authority(k_m_b))
             .await
             .expect("serve attest");
     });
@@ -145,8 +181,8 @@ async fn full_flow_over_unix_socket() {
         .await
         .expect("shared login over uds");
     mint::session::save(&session, &auth_transport).expect("persist session");
-    // As `mint login --config` does when the config colocates the demo
-    // attestation authority.
+    // As `mint login --config` does from the config's `[attestation].location`
+    // (here pointed at the stand-in authority's socket).
     mint::session::save_attest_transport(&format!("unix:{}", attest_sock.display()))
         .expect("persist attest transport");
     let invite = mint_invite(

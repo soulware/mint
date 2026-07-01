@@ -20,7 +20,6 @@
 pub const VERSION: &str = env!("MINT_VERSION");
 
 pub mod admin;
-pub mod attest;
 pub mod audit;
 pub mod auth;
 pub mod caveat;

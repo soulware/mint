@@ -98,9 +98,9 @@ pub const K_SESSION_FILE: &str = "auth-session.key";
 /// unrepresentable.
 #[derive(Debug, Clone, Copy)]
 pub enum KeyProvisioning {
-    /// A config literal — `[auth.demo].k_m_a` / `[attestation.demo].k_m_b`, the
-    /// distributed-demo shared secret. Authoritative: also mirrored to disk so
-    /// the on-disk file tracks the live key.
+    /// A config literal — `[auth.demo].k_m_a` / `[attestation].k_m_b`, the
+    /// shared secret. Authoritative: also mirrored to disk so the on-disk file
+    /// tracks the live key.
     Configured([u8; 32]),
     /// Demo (single-host fixture): load the on-disk key, or generate and
     /// persist one if absent.

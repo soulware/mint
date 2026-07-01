@@ -96,9 +96,8 @@ pub fn load_transport() -> Result<String, SessionError> {
 }
 
 /// Persist how to dial the attestation authority (`unix:<sock>` /
-/// `http(s)://host`), mode 0600. Written by `mint login --config` when
-/// the config colocates the demo attestation authority; durable like
-/// `auth-transport`.
+/// `http(s)://host`), mode 0600. Written by `mint login --config` from the
+/// config's `[attestation].location`; durable like `auth-transport`.
 pub fn save_attest_transport(transport: &str) -> Result<(), SessionError> {
     let d = dir()?;
     std::fs::create_dir_all(&d).map_err(|e| SessionError::Io(e.to_string()))?;

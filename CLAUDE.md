@@ -161,10 +161,12 @@ values into the credential as ordinary MAC'd caveats. The intermediate carries n
 durable, so the holder keeps it and finalizes per-use (e.g. a coordinator minting a credential per
 volume).
 Baked values are indistinguishable from the issuer-stamped `sub` and render as `{{caveat.X}}` (there is
-no `{{attested.X}}` namespace). An issuer-only role exchanges in one step with no authority. The demo
-attestation authority is **echo-only** — real plumbing (`K_M-B`, an `r`-bound discharge), but the
-verdict is stubbed to "approve whatever value is asked"; a production authority derives or validates
-the value from `(sub, role)` (the attested caveat's CID seals the role name for it).
+no `{{attested.X}}` namespace). An issuer-only role exchanges in one step with no authority. The
+attestation authority is a **separate service** mint does not run — it shares `K_M-B` with mint and is
+reached at `[attestation].location`. A demo/CI authority is **echo-only** — real plumbing (`K_M-B`, an
+`r`-bound discharge), but the verdict is stubbed to "approve whatever value is asked"; a production
+authority derives or validates the value from `(sub, role)` (the attested caveat's CID seals the role
+name for it).
 
 ### Module map
 - `caveat` / `macaroon` — the caveat algebra and wire format (above).
@@ -208,19 +210,20 @@ the value from `(sub, role)` (the attested caveat's CID seals the role name for 
   start) + a fresh discharge + per-call PoP. Production runs a standalone auth-service binary
   sharing `K_M-A` with mint; `auth.rs` is its in-tree demo stand-in, mounted on its own UDS only
   when `[auth.demo]` is configured.
-- `attest` / `tpc` — third-party-caveat (TPC) primitives and the **demo-only** attestation-discharge
-  issuer (mounted only under `[attestation.demo]`). `tpc` builds the AEAD-encrypted `(VID, CID)`
-  payload: a fresh ephemeral root `r` is sealed in VID under the chain tag `T_{n-1}` (so the verifier
-  recovers `r` from VID alone) and in CID under `K_M-A`. Production runs a real attestation authority
-  sharing `K_M-B` with mint.
+- `tpc` — third-party-caveat (TPC) primitives. Builds the AEAD-encrypted `(VID, CID)` payload: a
+  fresh ephemeral root `r` is sealed in VID under the chain tag `T_{n-1}` (so the verifier recovers
+  `r` from VID alone) and in CID under the wrapping key (`K_M-A` for auth TPCs, `K_M-B` for attested
+  TPCs). mint does not run an attestation authority — it stamps the attested TPC and verifies the
+  discharge; a separate authority sharing `K_M-B` opens the CID and mints the discharge.
 - `transport` — shared POST transport: `unix:<path>` (UDS, via hyper + hyperlocal) or
   `http(s)://host` (TCP, via reqwest). The reference client is **UDS-only**.
 
 ### Secret material
-The root keyring lives at `<data_dir>/root_keys/` (generated on first start). `K_M-A` (auth/TPC),
-`K_M-B` (attestation), and `K_session` (demo auth) are auto-generated **only in demo mode**
-(`[auth.demo]` / `[attestation.demo]`). A production instance must have them provisioned out of
-band and **fails closed if absent**. See `open_store` in `main.rs` for the gating.
+The root keyring lives at `<data_dir>/root_keys/` (generated on first start). `K_M-A` (auth/TPC) and
+`K_session` (demo auth) are auto-generated in demo mode (`[auth.demo]`); `K_M-B` (attestation) is
+taken from `[attestation].k_m_b` when set (the shared secret, byte-identical with the attestation
+authority), else generated in demo mode. A production instance must have them provisioned out of band
+and **fails closed if absent**. See `open_store` in `main.rs` for the gating.
 
 ## Reference material
 
