@@ -6,8 +6,8 @@
 # before it bakes in). `demo` is issuer-only — it binds just `sub`, so it
 # needs no authority and exchanges in one step. `demo-attested` binds the
 # non-reserved `bucket` and `project`, so its credential carries an attested
-# third-party caveat the demo authority discharges at exchange. Both also use
-# the mint-computed `{{mint.expiry}}`.
+# third-party caveat a separate attestation authority (see [attestation])
+# discharges at exchange. Both also use the mint-computed `{{mint.expiry}}`.
 #
 # The per-role policy templates live under roles_dir (examples/demo_roles/).
 # Provenance is derived from the template. A true deployment constant is
@@ -63,20 +63,17 @@ socket = "mint_data/auth.sock"
 # k_m_a = "REPLACE_WITH_BASE64_32_BYTE_KEY"
 
 [attestation]
-# Discharge URL for the attested caveat of any [role.attestation] role.
+# Discharge URL of the attestation authority for any attested role (one
+# binding a non-reserved caveat). The authority is a separate service — mint
+# does not run it — reached at this location; an attested role without it is
+# rejected at load.
 location = "https://attest.elide.internal/v1/discharge"
-
-# Colocate the attestation authority on a UDS. Demo / single-host only;
-# requires [auth.demo]. Omit for production.
-[attestation.demo]
-# Defaults to <data_dir>/attest.sock when omitted.
-socket = "mint_data/attest.sock"
 # K_M-B, the attestation TPC-CID wrapping key, as standard base64 of 32
-# bytes. Set this ONLY for the distributed demo, where mint and the
-# attestation coordinator run on separate hosts: render the same generated
-# value into both configs so the coordinator opens attestation CIDs mint
-# seals. Omit for the single-host fixture — mint then generates K_M-B on
-# first start.
+# bytes. mint seals every attested CID under it and the authority opens the
+# CID under the SAME value, so render one generated value byte-identically
+# into both mint's config and the authority's. Omit to have mint load it from
+# <data_dir>/attestation-shared.key — generated on first start in demo mode,
+# provisioned out of band otherwise.
 # k_m_b = "REPLACE_WITH_BASE64_32_BYTE_KEY"
 
 # Where mint keeps its own enrollment state (`_mint/*`). Operational

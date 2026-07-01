@@ -31,10 +31,10 @@ parallel baking path: holder values baked at `enroll-exchange`, attested
 values baked at `exchange-finalize`.
 
 The observation that removes all of it: **`holder` is `attested` with an
-authority that approves whatever is asked.** The demo attestation authority
-is exactly that — echo-only. So a holder caveat is not a different *kind* of
-value; it is the same "client proposes, authority vouches" value against a
-permissive verdict. Make that uniform and the per-caveat question
+authority that approves whatever is asked.** A permissive (echo-only)
+attestation authority is exactly that. So a holder caveat is not a different
+*kind* of value; it is the same "client proposes, authority vouches" value
+against a permissive verdict. Make that uniform and the per-caveat question
 disappears: a non-issuer caveat is *always* attested.
 
 ## The model: two provenances
@@ -132,8 +132,9 @@ caveat-bearing role, `enroll-exchange` always returns the
 values" branch is gone.
 
 Client-proposed values now travel where attested values already do: in the
-request to the attestation authority. `attest::AttestRequest` carries the
-full non-reserved set (was the `attested` subset):
+request to the attestation authority. The `/v1/discharge` request body
+(`AttestRequest` in `client.rs`) carries the full non-reserved set (was the
+`attested` subset):
 
 ```jsonc
 { "cid": "...", "caveats": { "bucket": "...", "project": "..." } }
@@ -172,38 +173,31 @@ permissive-authority case.
 client-proposed value now, and it always goes to the authority. An
 issuer-only role takes no value flags.
 
-## Demo mode: a co-located authority, like auth
+## The authority is always a separate party
 
-In production the attestation authority is a separate party that holds `K_M-B`
-and decides verdicts mint cannot. The demo models that **exactly as the demo
-auth role already does**: a co-located authority living *in mint's process*,
-holding an auto-generated `K_M-B`, served on its own socket (`attest.sock`)
-alongside `auth.sock`. The client reaches it the way it reaches the auth
-discharge plane — by *calling* it with a login session — and holds no `K_M-*`
-key itself. The two co-located demo authorities share that one login session as
-their gate, which is why `[attestation.demo]` requires `[auth.demo]`
-(`config.rs`, `DemoAttestationWithoutDemoAuth`).
+The attestation authority is a separate party that holds `K_M-B` and decides
+verdicts mint cannot. mint does not run one: it shares `K_M-B` with that
+authority (`[attestation].k_m_b`, rendered byte-identically into both
+configs — or provisioned out of band) and points `[attestation].location` at
+it. For a demo or CI, a **permissive echo authority** (approve-whatever) plays
+the role a production coord B does; it is a separate service either way. The
+client reaches it by *calling* it over a transport and holds no `K_M-*` key
+itself.
 
-An earlier draft proposed collapsing this into a "do-nothing" in-process
-discharge — dropping `K_M-B` and `attest.sock` and having mint (recovering `r`
-from the VID) or the client mint the discharge directly, on Fly's aside that an
-issuer "could make a 'do-nothing' 3P caveat … and mint a discharge Macaroon at
-the same time." That is **not** the design. Two facts rule it out:
+Two invariants make this the only shape, and rule out an alternative Fly notes
+in passing — a "do-nothing" in-process discharge where mint (recovering `r`
+from the VID) or the client mints the discharge directly:
 
 1. **A client must never hold a `K_M-*` key.** The codebase keeps this
    invariant throughout: `K_M-A` is server-side only — mint stamps CIDs with
    it, the auth service decrypts them, and the client gets discharges by
    *calling* that service over a session-gated socket, holding a session and
-   never the key (`client.rs` / `session.rs` name no `K_M-*`). Letting a demo
-   client read `K_M-B` to self-discharge would be the first crack in that
-   invariant, cut for a demo affordance. So the discharge stays with a
-   co-located authority that holds `K_M-B`; the client calls it.
+   never the key (`client.rs` / `session.rs` name no `K_M-*`). The attestation
+   authority holds `K_M-B` and recovers `r` from the CID; the client calls it.
 2. **mint stays a pure verifier.** mint issues the third-party caveat and
    verifies the discharge at `exchange-finalize`; it does not mint discharges.
    Folding a do-nothing discharge into mint's request path would bend a
-   production endpoint's contract to a demo shortcut. Keeping the authority on
-   `attest.sock` leaves `enroll-exchange` / `exchange-finalize` byte-identical
-   between demo and production.
+   production endpoint's contract to a shortcut.
 
 Fly's "do-nothing" line describes a *holder* attenuating its own macaroon —
 inventing a throwaway URL / `KA` / `r`, appending the TPC, and minting the
@@ -215,13 +209,10 @@ issuer did not choose. Collapsing them into a do-nothing erases the gate, so the
 analogy never carried. (Nowhere in mint is a TPC holder-added: the invite,
 ticket, admin-token, and attested intermediate are all issuer-added and
 authority-discharged.) The load-bearing idea we keep from it is only that *the
-verifier cannot distinguish a co-located authority from a remote one* — which
-holds here: the demo authority is a
-faithful scaled-down coord-B (same TPC, same `CID`-under-`K_M-B`, same discharge
-round-trip over a socket), differing only in that the party answering
-`attest.sock` is in mint's process rather than on a separate host. Production's
-"fetch a discharge over a transport" path is therefore exercised by the default
-demo itself, not a special-cased test.
+verifier cannot distinguish one authority from another* — same TPC, same
+`CID`-under-`K_M-B`, same discharge round-trip over a transport — so a permissive
+echo authority exercises production's "fetch a discharge over a transport" path
+without a special-cased test.
 
 ## Consequences
 
@@ -243,9 +234,8 @@ The costs are real:
    trust point — but it relocates the decision.
 4. **The demo changes shape.** The two roles (holder `demo`, attested
    `demo-attested`) collapse. A cleaner demo: one issuer-only role
-   (sub-scoped, no authority) and one attested role whose value the co-located
-   attestation authority vouches (on `attest.sock`, see *Demo mode* above) —
-   showcasing the two real provenances.
+   (sub-scoped, no authority) and one attested role whose value an external
+   attestation authority vouches — showcasing the two real provenances.
 
 ## Decisions
 
@@ -281,7 +271,7 @@ A sensible sequence:
    `intermediate_ttl_seconds` and make the attested intermediate always
    durable. The seal pins `ttl_seconds`; `authorize` grants it clamped to the
    presented macaroon's `exp`.
-4. **Demo, config, and docs.** Keep the colocated attestation authority on
-   `attest.sock` (it mirrors `auth.sock`, holds `K_M-B`, and is gated by the
-   demo login session); rewrite the demo roles (issuer-only + attested), the
+4. **Demo, config, and docs.** The attestation authority is a separate service
+   sharing `K_M-B` with mint (`[attestation].k_m_b` / `location`); mint runs no
+   colocated authority. Rewrite the demo roles (issuer-only + attested), the
    seal/validation, README, and CLAUDE.md to the two-provenance vocabulary.

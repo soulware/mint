@@ -195,6 +195,18 @@ pub fn location_path(location: &str) -> Option<String> {
     Some(path.to_string())
 }
 
+/// The scheme + authority of a TPC `location` (a full URL, e.g.
+/// `https://coord-b.internal/v1/discharge` → `https://coord-b.internal`) —
+/// the transport base the reference client dials, the request path coming
+/// separately from [`location_path`]. `None` if `location` is not an
+/// absolute URL carrying both a scheme and an authority.
+pub fn location_base(location: &str) -> Option<String> {
+    let uri: hyper::Uri = location.parse().ok()?;
+    let scheme = uri.scheme_str()?;
+    let authority = uri.authority()?;
+    Some(format!("{scheme}://{authority}"))
+}
+
 fn aead_encrypt(key: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
     let mut nonce = [0u8; AEAD_NONCE_LEN];
     OsRng.fill_bytes(&mut nonce);

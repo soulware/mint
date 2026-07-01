@@ -1,10 +1,12 @@
-//! End-to-end through the colocated demo attestation authority: login at
-//! the demo auth role → fetch an attestation discharge from the demo
-//! verifier → `exchange-finalize` bakes the attested value into the
-//! credential → assume-role renders a policy substituting every template
-//! namespace (`env`, `mint`, `caveat` — the attested value now resolves as
-//! `{{caveat.X}}`). The whole mint-as-verifier loop without a live Tigris
-//! or a real attestation authority.
+//! End-to-end through mint's attested-exchange path against a *simulated*
+//! external attestation authority: mint the intermediate carrying the
+//! undischarged attested TPC → an authority discharge (recover `r` from the
+//! CID under `K_M-B` and mint rooted at it, exactly as elide's coord B does)
+//! → `exchange-finalize` bakes the attested value into the credential →
+//! assume-role renders a policy substituting every template namespace
+//! (`mint`, `caveat` — the attested value now resolves as `{{caveat.X}}`).
+//! mint no longer stands up an attestation authority itself; this exercises
+//! mint's issuer/verifier half without a live Tigris or a real authority.
 
 use std::sync::Arc;
 
@@ -18,9 +20,10 @@ use mint::http::{AppState, router};
 use mint::iam::FakeMinter;
 use mint::issuance::{AttestedTpc, mint_intermediate};
 use mint::keyring::Keyring;
-use mint::macaroon::Macaroon;
+use mint::macaroon::{KeyRef, Macaroon, mint_under_key_with_nonce};
 use mint::pop;
 use mint::state::{KeyProvisioning, Store};
+use mint::tpc;
 use tower::ServiceExt;
 
 mod common;
@@ -29,9 +32,8 @@ const ROOT: [u8; 32] = [42u8; 32];
 const CLIENT_SEED: [u8; 32] = [7u8; 32];
 const SUB: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const ATTEST_LOCATION: &str = "https://attest.elide.internal/v1/discharge";
-/// The project the demo verifier attests, session-gated; baked into the
-/// credential at finalize and substituted by the policy as
-/// `{{caveat.project}}`.
+/// The project the authority attests; baked into the credential at finalize
+/// and substituted by the policy as `{{caveat.project}}`.
 const PROJECT: &str = "apollo";
 
 const TOML_TEMPLATE: &str = r#"
@@ -69,12 +71,12 @@ fn config() -> Config {
     common::parse_config(TOML_TEMPLATE, &[("attested-write.json", POLICY)])
 }
 
-/// AppState with demo keys provisioned the way `mint serve` does under
-/// `[auth.demo]` + `[attestation.demo]`: K_M-A (settling org = "demo"),
-/// K_session (the login-session root), and K_M-B (the attestation
-/// wrapping key). Returns the generated K_M-B so the test can stamp the
-/// intermediate's attested TPC the way issuance does.
-async fn demo_state() -> (AppState, Arc<FakeMinter>, [u8; 32], tempfile::TempDir) {
+/// AppState with the keys `mint serve` provisions for an attested role:
+/// K_M-A (settling org = "demo") and K_M-B (the attestation wrapping key mint
+/// stamps CIDs under). Returns the generated K_M-B so the test can stamp the
+/// intermediate's attested TPC the way issuance does and recover `r` the way
+/// the authority does.
+async fn state() -> (AppState, Arc<FakeMinter>, [u8; 32], tempfile::TempDir) {
     let minter = Arc::new(FakeMinter::new());
     let dir = tempfile::tempdir().expect("tempdir");
     let cfg = config();
@@ -87,7 +89,6 @@ async fn demo_state() -> (AppState, Arc<FakeMinter>, [u8; 32], tempfile::TempDir
     store
         .init_k_m_a(dir.path(), KeyProvisioning::GenerateIfAbsent)
         .expect("k_m_a");
-    store.init_k_session(dir.path()).expect("k_session");
     store
         .init_k_m_b(dir.path(), KeyProvisioning::GenerateIfAbsent)
         .expect("k_m_b");
@@ -146,44 +147,30 @@ fn tpc_cid(m: &Macaroon) -> Vec<u8> {
         .expect("the intermediate carries the attested TPC")
 }
 
+/// Mint the attestation discharge the way an external authority does: recover
+/// `r` from the intermediate's attested TPC CID under `K_M-B`
+/// (`tpc::decrypt_cid_attested` — the authority has no `K_M`, so it must
+/// decrypt the CID), then mint a discharge rooted at `r` carrying each
+/// requested `(name, value)` plus `exp`. Mirrors `coord_b_discharge` in
+/// `discharge_verify.rs` and the elide attestation coordinator.
+fn authority_discharge(
+    k_m_b: &[u8; 32],
+    intermediate: &Macaroon,
+    caveats: &[(&str, &str)],
+) -> Macaroon {
+    let cid = tpc_cid(intermediate);
+    let pt = tpc::decrypt_cid_attested(k_m_b, &cid).expect("recover r from attested cid");
+    let mut cvs: Vec<Caveat> = caveats.iter().map(|&(n, v)| Caveat::scalar(n, v)).collect();
+    cvs.push(Caveat::scalar(name::EXP, far_future().to_string()));
+    mint_under_key_with_nonce(&pt.r, KeyRef::Discharge, tpc::ticket_id(&cid), cvs)
+}
+
 async fn body_string(resp: axum::response::Response) -> (StatusCode, String) {
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .expect("collect body");
     (status, String::from_utf8(bytes.to_vec()).expect("utf8"))
-}
-
-/// `POST /v1/login` at the demo auth role, as `mint login` does.
-async fn login(state: &AppState) -> String {
-    let req = Request::builder()
-        .method("POST")
-        .uri("/v1/login")
-        .header("content-type", "application/json")
-        .body(Body::from(r#"{"subject":"demo-operator"}"#))
-        .unwrap();
-    let app = mint::auth::router(state.clone());
-    let (status, body) = body_string(app.oneshot(req).await.unwrap()).await;
-    assert_eq!(status, StatusCode::OK, "login: {body}");
-    json_str(&body, "session")
-}
-
-/// `POST /v1/discharge` at the demo attestation authority.
-async fn attest_request(
-    state: &AppState,
-    session: Option<&str>,
-    body: serde_json::Value,
-) -> (StatusCode, String) {
-    let mut builder = Request::builder()
-        .method("POST")
-        .uri("/v1/discharge")
-        .header("content-type", "application/json");
-    if let Some(s) = session {
-        builder = builder.header("authorization", format!("Bearer {s}"));
-    }
-    let req = builder.body(Body::from(body.to_string())).unwrap();
-    let app = mint::attest::router(state.clone());
-    body_string(app.oneshot(req).await.unwrap()).await
 }
 
 /// `POST /v1/exchange-finalize` with the intermediate + attestation
@@ -221,26 +208,13 @@ fn json_str(body: &str, key: &str) -> String {
         .unwrap_or_else(|| panic!("no {key:?} in: {body}"))
 }
 
-fn b64(cid: &[u8]) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(cid)
-}
-
 #[tokio::test]
-async fn demo_attest_loop_bakes_then_renders() {
-    let (state, minter, k_m_b, _dir) = demo_state().await;
+async fn attested_exchange_bakes_then_renders() {
+    let (state, minter, k_m_b, _dir) = state().await;
     let interm = intermediate(&k_m_b);
 
-    // login → session-gated attestation discharge of the intermediate's TPC.
-    let session = login(&state).await;
-    let (status, body) = attest_request(
-        &state,
-        Some(&session),
-        serde_json::json!({"cid": b64(&tpc_cid(&interm)), "caveats": {"project": PROJECT}}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "discharge: {body}");
-    let discharge = Macaroon::decode(&json_str(&body, "discharge")).expect("discharge decodes");
+    // The authority discharges the intermediate's TPC, vouching `project`.
+    let discharge = authority_discharge(&k_m_b, &interm, &[("project", PROJECT)]);
 
     // exchange-finalize bakes `project` into the credential.
     let (status, body) = finalize(&state, &interm, &discharge).await;
@@ -288,75 +262,14 @@ async fn demo_attest_loop_bakes_then_renders() {
 }
 
 #[tokio::test]
-async fn discharge_requires_a_session() {
-    let (state, _minter, k_m_b, _dir) = demo_state().await;
-    let interm = intermediate(&k_m_b);
-    let (status, _) = attest_request(
-        &state,
-        None,
-        serde_json::json!({"cid": b64(&tpc_cid(&interm)), "caveats": {"project": PROJECT}}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn discharge_refuses_reserved_attested_names() {
-    // Each authority emits only its own vocabulary: the demo verifier
-    // must refuse to attest a reserved control-caveat name, so its
-    // discharge can never carry `sub`/`exp`/… as attested data.
-    let (state, _minter, k_m_b, _dir) = demo_state().await;
-    let interm = intermediate(&k_m_b);
-    let session = login(&state).await;
-    for reserved in name::RESERVED {
-        let (status, body) = attest_request(
-            &state,
-            Some(&session),
-            serde_json::json!({"cid": b64(&tpc_cid(&interm)), "caveats": {*reserved: "forged"}}),
-        )
-        .await;
-        assert_eq!(
-            status,
-            StatusCode::BAD_REQUEST,
-            "reserved name {reserved:?} must be refused: {body}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn discharge_allows_an_empty_attested_set() {
-    // A gate-only role discharges its TPC with no values — the authority
-    // vouches, but nothing is baked. The discharge carries only its `exp`.
-    let (state, _minter, k_m_b, _dir) = demo_state().await;
-    let interm = intermediate(&k_m_b);
-    let session = login(&state).await;
-    let (status, body) = attest_request(
-        &state,
-        Some(&session),
-        serde_json::json!({"cid": b64(&tpc_cid(&interm)), "caveats": {}}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "gate-only discharge: {body}");
-}
-
-#[tokio::test]
 async fn finalize_missing_attested_value_is_400() {
     // The `attested-write` role requires `project`. A gate-only discharge
     // (empty attested set) verifies and clears the TPC, but carries no
     // `project` — finalize must reject it with a clean 400 before minting,
     // never baking an unscoped credential.
-    let (state, _minter, k_m_b, _dir) = demo_state().await;
+    let (state, _minter, k_m_b, _dir) = state().await;
     let interm = intermediate(&k_m_b);
-    let session = login(&state).await;
-    let (status, body) = attest_request(
-        &state,
-        Some(&session),
-        serde_json::json!({"cid": b64(&tpc_cid(&interm)), "caveats": {}}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "gate-only discharge: {body}");
-    let discharge = Macaroon::decode(&json_str(&body, "discharge")).expect("discharge decodes");
-
+    let discharge = authority_discharge(&k_m_b, &interm, &[]);
     let (status, _) = finalize(&state, &interm, &discharge).await;
     assert_eq!(
         status,
@@ -370,7 +283,7 @@ async fn finalize_without_the_discharge_is_refused() {
     // The intermediate carries the attested TPC; presenting it bare to
     // exchange-finalize must fail verification — the discharge is not
     // optional, and no credential is minted.
-    let (state, _minter, k_m_b, _dir) = demo_state().await;
+    let (state, _minter, k_m_b, _dir) = state().await;
     let interm = intermediate(&k_m_b);
     let ts = chrono::Utc::now().timestamp() as u64;
     let body = format!("{{\"ts\":{ts}}}");

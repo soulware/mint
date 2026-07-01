@@ -41,13 +41,9 @@ fn mint_demo_config_loads() {
         cfg.auth_location.is_some(),
         "demo configures the admin-service location"
     );
-    // …and the attestation authority, so `demo-attested` has a
-    // discharge issuer for its attested TPC.
-    let attest = cfg.demo_attestation.expect("[attestation.demo] present");
-    assert!(
-        attest.socket.ends_with("attest.sock"),
-        "demo attestation binds a UDS"
-    );
+    // …and the attestation plane's discharge location, so `demo-attested`
+    // has an (external) authority for its attested TPC. The authority itself
+    // is no longer colocated by mint.
     assert!(
         cfg.attestation_location.is_some(),
         "the attested role requires attestation_location"

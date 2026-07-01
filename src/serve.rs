@@ -1,7 +1,7 @@
 //! The serve loop shared by every mint daemon shape: admin-service
 //! provisioning, template-seal startup, the mint/admin router on the
-//! configured listener, and the colocated demo-auth / demo-attestation
-//! listeners when `[auth.demo]` / `[attestation.demo]` are enabled.
+//! configured listener, and the colocated demo-auth listener when
+//! `[auth.demo]` is enabled.
 //!
 //! Callers construct the store and minter for their backend and hand
 //! them in: `mint serve` opens the Tigris-backed store with a real
@@ -148,13 +148,6 @@ pub async fn run(
     // auth-service binary instead — mint never opens this socket without
     // `[auth.demo]`.
     let auth_socket = state.config.demo_auth.as_ref().map(|d| d.socket.clone());
-    // Same shape for the demo attestation authority: its own UDS, its
-    // own router, only when `[attestation.demo]` is present.
-    let attest_socket = state
-        .config
-        .demo_attestation
-        .as_ref()
-        .map(|d| d.socket.clone());
 
     let mint_listener: Pin<Box<dyn Future<Output = io::Result<()>> + Send>> = match transport {
         Listener::Tcp(addr) => {
@@ -175,19 +168,15 @@ pub async fn run(
     };
 
     let auth_fut = match auth_socket {
-        Some(path) => serve_role_uds(&path, crate::auth::router(state.clone()), "auth")?,
+        Some(path) => serve_role_uds(&path, crate::auth::router(state), "auth")?,
         None => Box::pin(std::future::ready(Ok(()))),
     };
-    let attest_fut = match attest_socket {
-        Some(path) => serve_role_uds(&path, crate::attest::router(state), "attest")?,
-        None => Box::pin(std::future::ready(Ok(()))),
-    };
-    // `try_join!` fails-fast: a fault on any listener brings the
+    // `try_join!` fails-fast: a fault on either listener brings the
     // process down. Every enabled listener is required for a working
     // demo, so partial-up is never the right state. (A disabled role's
     // arm is an immediately-ready `Ok`, which `try_join!` ignores while
     // the live listeners run.)
-    tokio::try_join!(mint_listener, auth_fut, attest_fut)?;
+    tokio::try_join!(mint_listener, auth_fut)?;
     Ok(())
 }
 

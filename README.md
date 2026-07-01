@@ -130,7 +130,7 @@ Once a client has successfully enrolled with mint it can exchange its credential
 ./target/debug/mint client assume-role demo
 ```
 
-For a more complex example the `demo-attested` role binds values a third party must vouch for. By default mint runs with a demo attestation service available via `attest.sock` locally.
+For a more complex example the `demo-attested` role binds values a third party must vouch for. This requires an external attestation authority — configured via `[attestation].location` and sharing `K_M-B` with mint — which mint does not run itself; the `mint client exchange demo-attested` step below only completes once that authority is reachable.
 
 The template for the `demo-attested` role substitutes two *attested* `{{caveat.X}}` values — the caller proposes each and the authority vouches it before it is baked in:
 

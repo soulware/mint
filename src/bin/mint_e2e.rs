@@ -53,12 +53,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             store.init_k_session(&config.data_dir)?;
         }
     }
-    let attest_demo = config.demo_attestation.is_some();
-    if config.roles.values().any(|r| r.is_attested()) || attest_demo {
-        let prov = KeyProvisioning::resolve(
-            config.demo_attestation.as_ref().and_then(|d| d.k_m_b),
-            demo_enabled,
-        );
+    if config.roles.values().any(|r| r.is_attested()) {
+        let prov = KeyProvisioning::resolve(config.attestation_k_m_b, demo_enabled);
         store.init_k_m_b(&config.data_dir, prov)?;
     }
 
