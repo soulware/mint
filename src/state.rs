@@ -56,8 +56,8 @@ use bytes::Bytes;
 use futures::StreamExt;
 use object_store::path::Path as OPath;
 use object_store::{
-    Error as OsError, GetOptions, ObjectStore, PutMode, PutOptions, PutPayload,
-    local::LocalFileSystem, memory::InMemory,
+    Error as OsError, ObjectStore, PutMode, PutOptions, PutPayload, local::LocalFileSystem,
+    memory::InMemory,
 };
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -523,11 +523,11 @@ fn unhex32(s: &str) -> Option<[u8; 32]> {
 /// or local `O_EXCL`); within one process tokio's async scheduling is
 /// enough — no internal mutex.
 ///
-/// The invite nonce is cached locally with an ETag stamp; the
-/// background task spawned by [`Store::spawn_invite_refresh`] polls
-/// with `If-None-Match` so steady-state reads cost a cheap 304 instead
-/// of a full body fetch (`docs/design-mint.md` § *Mint state in the
-/// store bucket*).
+/// The invite nonce is read from the canonical `_mint/invite` object on
+/// every check: its readers (the enroll gate and the admin invite
+/// plane) are operator-paced, and the direct read means a rotation
+/// takes effect immediately on every instance sharing the bucket
+/// (`docs/design-mint.md` § *Mint state in the store bucket*).
 pub struct Store {
     /// The macaroon keyring — generations loaded from
     /// `<data_dir>/root_keys/`. Symmetric: mint both mints and verifies
@@ -564,21 +564,7 @@ pub struct Store {
     /// `None` when `k_m_a` is `None`.
     org_id: Option<String>,
     objects: Arc<dyn ObjectStore>,
-    invite_cache: Arc<RwLock<InviteSnapshot>>,
 }
-
-#[derive(Debug, Clone)]
-struct InviteSnapshot {
-    value: String,
-    etag: Option<String>,
-}
-
-/// Default cadence at which the background task polls
-/// `_mint/invite` for rotation. 30 s keeps the staleness window short
-/// enough that rotation-cancels-in-flight stays meaningful while
-/// reducing per-request load on the object store to zero in steady
-/// state.
-pub const INVITE_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl Store {
     /// Local-filesystem backend rooted at `dir` — the dev / co-resident
@@ -654,10 +640,6 @@ impl Store {
             k_session: None,
             org_id: None,
             objects,
-            invite_cache: Arc::new(RwLock::new(InviteSnapshot {
-                value: String::new(),
-                etag: None,
-            })),
         }
     }
 
@@ -805,8 +787,7 @@ impl Store {
         OPath::from(format!("{STATE_PREFIX}/templates/seal.json"))
     }
 
-    /// Initialise the invite nonce on first start (idempotent), then
-    /// populate the local cache from the canonical object.
+    /// Initialise the invite nonce on first start (idempotent).
     /// `PutMode::Create` keeps concurrent inits race-safe.
     async fn ensure_invite(&self) -> Result<(), StateError> {
         match self
@@ -818,34 +799,25 @@ impl Store {
             )
             .await
         {
-            Ok(_) | Err(OsError::AlreadyExists { .. }) => {}
-            Err(e) => return Err(e.into()),
+            Ok(_) | Err(OsError::AlreadyExists { .. }) => Ok(()),
+            Err(e) => Err(e.into()),
         }
-        let (value, etag) = self.fetch_invite().await?;
-        *self.invite_cache.write().await = InviteSnapshot { value, etag };
-        Ok(())
-    }
-
-    /// Single unconditional GET of `_mint/invite`, returning the body
-    /// and its ETag. Used at construction and by the refresh task on a
-    /// 200 response.
-    async fn fetch_invite(&self) -> Result<(String, Option<String>), StateError> {
-        let g = self.objects.get(&Self::invite_key()).await?;
-        let etag = g.meta.e_tag.clone();
-        let bytes = g.bytes().await?;
-        let value = String::from_utf8_lossy(&bytes).trim().to_string();
-        Ok((value, etag))
     }
 
     /// The current invite nonce — the value a presented invite
-    /// macaroon's `invite` caveat must equal. Reads the cached value;
-    /// `spawn_invite_refresh` keeps the cache fresh in the background.
+    /// macaroon's `invite` caveat must equal. Reads the canonical
+    /// `_mint/invite` object each call: the enroll gate and the admin
+    /// invite plane are the only readers, both operator-paced, so
+    /// every check sees a rotation the moment it lands — including
+    /// one performed by another instance sharing the bucket.
     pub async fn current_invite(&self) -> Result<String, StateError> {
-        let snap = self.invite_cache.read().await;
-        if snap.value.is_empty() {
+        let g = self.objects.get(&Self::invite_key()).await?;
+        let bytes = g.bytes().await?;
+        let value = String::from_utf8_lossy(&bytes).trim().to_string();
+        if value.is_empty() {
             return Err(StateError::Corrupt);
         }
-        Ok(snap.value.clone())
+        Ok(value)
     }
 
     /// Best-effort read of the cached invite macaroon. Returns the stored
@@ -896,67 +868,6 @@ impl Store {
         Ok(())
     }
 
-    /// Spawn the background task that keeps `current_invite()` fresh
-    /// by polling `_mint/invite` with `If-None-Match: <etag>` every
-    /// [`INVITE_REFRESH_INTERVAL`]. On `304 Not Modified` (the common
-    /// case) the cache is left alone; a `200` swaps in the new
-    /// `(value, etag)`. Returns the handle so callers can cancel; the
-    /// task exits cleanly when its [`Store`] strong references are
-    /// dropped because the inner `Arc<RwLock>` is the only thing it
-    /// retains across `.await` boundaries.
-    pub fn spawn_invite_refresh(
-        self: &Arc<Self>,
-        interval: std::time::Duration,
-    ) -> tokio::task::JoinHandle<()> {
-        let weak = Arc::downgrade(self);
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(interval);
-            // First tick fires immediately by default; skip it so the
-            // background work doesn't double up with the construction
-            // path's eager fetch.
-            ticker.tick().await;
-            loop {
-                ticker.tick().await;
-                let Some(store) = weak.upgrade() else {
-                    return;
-                };
-                let last_etag = store.invite_cache.read().await.etag.clone();
-                let opts = GetOptions {
-                    if_none_match: last_etag.clone(),
-                    ..Default::default()
-                };
-                match store.objects.get_opts(&Self::invite_key(), opts).await {
-                    Ok(g) => {
-                        let etag = g.meta.e_tag.clone();
-                        match g.bytes().await {
-                            Ok(bytes) => {
-                                let value = String::from_utf8_lossy(&bytes).trim().to_string();
-                                *store.invite_cache.write().await = InviteSnapshot { value, etag };
-                            }
-                            Err(e) => tracing::warn!(
-                                target: "mint::state",
-                                error = %e,
-                                "invite refresh: body read failed"
-                            ),
-                        }
-                    }
-                    // `Error::NotModified` is the steady-state hit: the
-                    // object hasn't changed since `last_etag`. Quiet success.
-                    Err(OsError::NotModified { .. }) => {}
-                    // `Error::Precondition` is what some backends return for
-                    // `If-None-Match` matches when they don't model 304
-                    // separately. Treat it the same — no rotation.
-                    Err(OsError::Precondition { .. }) => {}
-                    Err(e) => tracing::warn!(
-                        target: "mint::state",
-                        error = %e,
-                        "invite refresh: get failed"
-                    ),
-                }
-            }
-        })
-    }
-
     /// Draw and persist a new invite nonce, then drop every pending
     /// record opened under an older nonce. The enrolled registry is
     /// **not** touched: outstanding credentials and the re-enrollment
@@ -970,11 +881,6 @@ impl Store {
                 PutOptions::default(),
             )
             .await?;
-        // Re-read so the cache picks up the canonical ETag the backend
-        // assigned, not a synthesised one — keeps `If-None-Match`
-        // poll-paths consistent across processes.
-        let (value, etag) = self.fetch_invite().await?;
-        *self.invite_cache.write().await = InviteSnapshot { value, etag };
         for sub in self.pending_subs().await? {
             if let Ok(Some(p)) = self.get_pending(&sub).await
                 && p.invite != nonce
@@ -2840,15 +2746,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn background_refresh_picks_up_external_rotation() {
+    async fn external_rotation_is_immediately_visible() {
         // Simulate a peer mint instance rotating the invite by writing
-        // directly to the backend; the refresh task should swap our
-        // cache the next time it polls.
+        // directly to the backend; `current_invite` reads the canonical
+        // object, so the very next check sees the new nonce.
         let s = Arc::new(Store::open_in_memory([1u8; 32]).await.unwrap());
         let initial = s.current_invite().await.unwrap();
-        // Fast poll interval so the test doesn't waste real time.
-        let handle = s.spawn_invite_refresh(std::time::Duration::from_millis(50));
-        // External write under the canonical key.
         let new_nonce = "EXTERNALLY_ROTATED_NONCE";
         s.objects
             .put_opts(
@@ -2858,19 +2761,8 @@ mod tests {
             )
             .await
             .unwrap();
-        // Wait a few intervals for the refresh task to catch up.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            if s.current_invite().await.unwrap() == new_nonce {
-                break;
-            }
-            if std::time::Instant::now() > deadline {
-                panic!("cache did not refresh from external write");
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
+        assert_eq!(s.current_invite().await.unwrap(), new_nonce);
         assert_ne!(initial, new_nonce);
-        handle.abort();
     }
 
     #[tokio::test]
