@@ -114,12 +114,6 @@ pub async fn run(
         .await
         .map_err(io::Error::other)?;
 
-    // Steady-state /v1/enroll reads the invite from a local cache that
-    // a background task keeps fresh with `If-None-Match` (~30 s, cheap
-    // 304 on the common path). Rotation by this process updates the
-    // cache eagerly; this task picks up rotations by any other instance.
-    let _invite_refresh = store.spawn_invite_refresh(crate::state::INVITE_REFRESH_INTERVAL);
-
     // An explicit --bind forces TCP, overriding the config's resolved
     // listener (the single-host TCP override). Otherwise the config's
     // bind/socket choice stands. Resolved before `config` moves into
