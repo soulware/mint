@@ -472,11 +472,15 @@ async fn serve(
     // Human-readable trace goes to stderr; stdout is reserved for the
     // structured audit log (`AuditLog` writes JSON lines there), so
     // `mint serve >audit.jsonl 2>trace.log` keeps the two streams apart.
-    // `RUST_LOG=mint::serve=debug` surfaces per-request narration.
+    // `RUST_LOG=mint::serve=debug` surfaces per-request narration. The
+    // default filter holds the object_store crate at warn (at info it
+    // narrates credential-provider selection on every client build);
+    // setting `RUST_LOG` replaces the whole filter.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,object_store=warn".into()),
         )
         .init();
 

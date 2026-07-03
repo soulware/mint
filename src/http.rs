@@ -31,7 +31,7 @@ use chrono::{Timelike, Utc};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::audit::{AuditEntry, AuditLog, sanitise_caveats};
+use crate::audit::{AuditCaveat, AuditEntry, AuditLog, sanitise_caveats};
 use crate::caveat::{Caveat, EffectiveCaveats, Resolved, name, op, scope};
 use crate::config::Config;
 use crate::iam::{self, KeypairMinter};
@@ -192,8 +192,40 @@ fn trace_received(op: &str, request_id: &str, caller: &str) {
 /// line's outcome tag (`granted`, `denied:<reason>`, `awaiting_approval`, …).
 /// `info` so each client interaction shows up by default. `role` is empty
 /// where the operation has none (enroll) or has not resolved one yet.
-fn trace_outcome(op: &str, request_id: &str, caller: &str, role: &str, outcome: &str) {
-    tracing::info!(target: "mint::serve", op, request_id, caller, role, outcome, "request handled");
+/// `caveats` supplies the presented chain's `sub` (the enrolled
+/// identity) and the request's scoping values (see [`scoping_context`]);
+/// the full caveat record lives in the audit line.
+fn trace_outcome(
+    op: &str,
+    request_id: &str,
+    caller: &str,
+    role: &str,
+    outcome: &str,
+    caveats: &[AuditCaveat],
+) {
+    let sub = caveats
+        .iter()
+        .find(|c| c.name == name::SUB)
+        .map(|c| c.value.as_str())
+        .unwrap_or("");
+    let caveats = scoping_context(caveats);
+    tracing::info!(target: "mint::serve", op, request_id, caller, sub, role, outcome, caveats, "request handled");
+}
+
+/// The non-reserved caveats on the presented chain, rendered
+/// `name=value,…` for the operator narration. The reserved names are
+/// the identity/control plumbing every request carries (`sub`, `cnf`,
+/// `op`, …) and a `tpc:` entry is a gate, not a value — what remains is
+/// the request's scoping context (attestation-baked or
+/// client-attenuated values, e.g. a volume id), which is what
+/// distinguishes one line from the next.
+fn scoping_context(caveats: &[AuditCaveat]) -> String {
+    caveats
+        .iter()
+        .filter(|c| !name::RESERVED.contains(&c.name.as_str()) && !c.name.starts_with("tpc:"))
+        .map(|c| format!("{}={}", c.name, c.value))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// A scalar caveat must be present and equal to `expected` — the
@@ -444,6 +476,7 @@ async fn assume_role(State(state): State<AppState>, headers: HeaderMap, body: By
             &entry.caller_address,
             &entry.role,
             &entry.outcome,
+            &entry.macaroon_caveats,
         );
         state.audit.record(&entry);
     };
@@ -752,13 +785,21 @@ async fn enroll(State(state): State<AppState>, headers: HeaderMap, body: Bytes) 
     trace_received(op::ENROLL, &request_id, &caller);
     let now_unix = Utc::now().timestamp().max(0) as u64;
     let audit = |outcome: &str, caveats: &[Caveat]| {
-        trace_outcome(op::ENROLL, &request_id, &caller, "", outcome);
+        let macaroon_caveats = sanitise_caveats(caveats);
+        trace_outcome(
+            op::ENROLL,
+            &request_id,
+            &caller,
+            "",
+            outcome,
+            &macaroon_caveats,
+        );
         state.audit.record(&AuditEntry {
             timestamp: Utc::now().to_rfc3339(),
             request_id: request_id.clone(),
             caller_address: caller.clone(),
             macaroon_nonce: None,
-            macaroon_caveats: sanitise_caveats(caveats),
+            macaroon_caveats,
             role: String::new(),
             granted_ttl_seconds: None,
             outcome: format!("enroll:{outcome}"),
@@ -1020,13 +1061,21 @@ async fn enroll_exchange(
     // denials pass ""); no Tigris key is minted here, so the key field is
     // always absent on these lines.
     let audit = |outcome: &str, caveats: &[Caveat], role: &str| {
-        trace_outcome(op::ENROLL_EXCHANGE, &request_id, &caller, role, outcome);
+        let macaroon_caveats = sanitise_caveats(caveats);
+        trace_outcome(
+            op::ENROLL_EXCHANGE,
+            &request_id,
+            &caller,
+            role,
+            outcome,
+            &macaroon_caveats,
+        );
         state.audit.record(&AuditEntry {
             timestamp: Utc::now().to_rfc3339(),
             request_id: request_id.clone(),
             caller_address: caller.clone(),
             macaroon_nonce: None,
-            macaroon_caveats: sanitise_caveats(caveats),
+            macaroon_caveats,
             role: role.to_string(),
             granted_ttl_seconds: None,
             outcome: format!("exchange:{outcome}"),
@@ -1301,13 +1350,21 @@ async fn exchange_finalize(
     // every line after it's resolved from the cleared caveats (the
     // role-less early denials pass ""); no Tigris key is minted here.
     let audit = |outcome: &str, caveats: &[Caveat], role: &str| {
-        trace_outcome(op::EXCHANGE_FINALIZE, &request_id, &caller, role, outcome);
+        let macaroon_caveats = sanitise_caveats(caveats);
+        trace_outcome(
+            op::EXCHANGE_FINALIZE,
+            &request_id,
+            &caller,
+            role,
+            outcome,
+            &macaroon_caveats,
+        );
         state.audit.record(&AuditEntry {
             timestamp: Utc::now().to_rfc3339(),
             request_id: request_id.clone(),
             caller_address: caller.clone(),
             macaroon_nonce: None,
-            macaroon_caveats: sanitise_caveats(caveats),
+            macaroon_caveats,
             role: role.to_string(),
             granted_ttl_seconds: None,
             outcome: format!("finalize:{outcome}"),
@@ -1534,4 +1591,45 @@ fn verify_failure(request_id: &str, reason: &'static str) -> Response {
         StatusCode::OK,
         json!({"valid": false, "reason": reason}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The operator trace's `caveats` field is the scoping values only:
+    /// reserved (identity/control) names and third-party gates drop out,
+    /// and what remains — e.g. an attestation-baked volume id — renders
+    /// `name=value,…` in chain order.
+    #[test]
+    fn scoping_context_keeps_only_non_reserved_values() {
+        let caveats = sanitise_caveats(&[
+            Caveat::scalar(name::AUD, "mint"),
+            Caveat::scalar(name::SUB, "01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            Caveat::scalar(name::CNF, "ed25519:abc"),
+            Caveat::scalar("elide:Volume", "01JQAAAAAAAAAAAAAAAAAAAAAA"),
+            Caveat::scalar("tier", "gold"),
+            Caveat::ThirdParty {
+                location: "https://auth.example/v1/discharge".into(),
+                vid: vec![1, 2, 3],
+                cid: vec![4, 5, 6],
+            },
+        ]);
+        assert_eq!(
+            scoping_context(&caveats),
+            "elide:Volume=01JQAAAAAAAAAAAAAAAAAAAAAA,tier=gold"
+        );
+    }
+
+    /// A chain carrying only reserved caveats (an issuer-only credential)
+    /// yields an empty scoping field.
+    #[test]
+    fn scoping_context_is_empty_for_issuer_only_chains() {
+        let caveats = sanitise_caveats(&[
+            Caveat::scalar(name::SUB, "01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            Caveat::scalar(name::ROLE, "volume-ro"),
+            Caveat::scalar(name::EXP, "1735689600"),
+        ]);
+        assert_eq!(scoping_context(&caveats), "");
+    }
 }
